@@ -9,6 +9,14 @@
   "scripts": {
     "test": "python -m unittest discover tests"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/subhasishsaha/memory-hook-for-agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/subhasishsaha/memory-hook-for-agents/issues"
+  },
+  "homepage": "https://github.com/subhasishsaha/memory-hook-for-agents#readme",
   "keywords": [
     "ai",
     "agents",

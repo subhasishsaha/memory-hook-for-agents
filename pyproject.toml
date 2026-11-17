@@ -18,6 +18,11 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
+[project.urls]
+Homepage = "https://github.com/subhasishsaha/memory-hook-for-agents"
+Repository = "https://github.com/subhasishsaha/memory-hook-for-agents"
+Issues = "https://github.com/subhasishsaha/memory-hook-for-agents/issues"
+
 [project.scripts]
 memory-hook = "memory_hook.cli:main"
 
