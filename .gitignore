@@ -22,3 +22,9 @@ htmlcov/
 # Logs
 *.log
 !tests/**
+
+# Runtime memory hook state
+.memory/
+
+# Audit artifacts (repo-publish-prep)
+.audit/

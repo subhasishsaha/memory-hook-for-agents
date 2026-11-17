@@ -14,5 +14,5 @@ else
     exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-"$PYTHON_CMD" "$SCRIPT_DIR/install.py" "$TARGET_DIR"
+"$PYTHON_CMD" -m pip install --quiet memory-hook
+"$PYTHON_CMD" -m memory_hook.cli install "$TARGET_DIR"

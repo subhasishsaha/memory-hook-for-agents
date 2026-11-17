@@ -1,5 +1,4 @@
-# Universal one-line installer for Windows PowerShell
-param (
+param(
     [string]$TargetDir = (Get-Location).Path
 )
 
@@ -7,11 +6,10 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "Installing memory-hook into $TargetDir..." -ForegroundColor Cyan
 
-$PythonCmd = "python"
-if (-not (Get-Command $PythonCmd -ErrorAction SilentlyContinue)) {
+if (-not (Get-Command "python" -ErrorAction SilentlyContinue)) {
     Write-Error "Python 3 is required to install memory-hook."
     exit 1
 }
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-& $PythonCmd "$ScriptDir\install.py" $TargetDir
+python -m pip install --quiet memory-hook
+python -m memory_hook.cli install $TargetDir

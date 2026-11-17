@@ -6,21 +6,38 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .constants import (
-    LONG_LOG_NAME,
-    MEMORY_DIR_NAME,
-    SHORT_LOG_NAME,
-    STATE_FILE_NAME,
-    SUPPORTED_PROVIDERS,
-)
-from .installer import install_hooks
-from .runner import main as runner_main
-from .state import MemoryState
+try:
+    from .constants import (
+        LONG_LOG_NAME,
+        MEMORY_DIR_NAME,
+        SHORT_LOG_NAME,
+        STATE_FILE_NAME,
+        SUPPORTED_PROVIDERS,
+    )
+    from .installer import install_hooks
+    from .runner import main as runner_main, run_hook
+    from .state import MemoryState
+except (ImportError, ValueError):
+    # Direct execution fallback (e.g. python memory_hook/cli.py)
+    pkg_dir = Path(__file__).resolve().parent.parent
+    if str(pkg_dir) not in sys.path:
+        sys.path.insert(0, str(pkg_dir))
+    from memory_hook.constants import (
+        LONG_LOG_NAME,
+        MEMORY_DIR_NAME,
+        SHORT_LOG_NAME,
+        STATE_FILE_NAME,
+        SUPPORTED_PROVIDERS,
+    )
+    from memory_hook.installer import install_hooks
+    from memory_hook.runner import main as runner_main, run_hook
+    from memory_hook.state import MemoryState
 
 
 def cmd_install(args: argparse.Namespace) -> None:
     """Handles the install command."""
-    target_path = Path(args.path).resolve() if args.path else Path.cwd().resolve()
+    target = args.path or getattr(args, "target_path", None)
+    target_path = Path(target).resolve() if target else Path.cwd().resolve()
     providers = [args.provider] if args.provider else ["all"]
     print(f"Installing cross-provider memory-hook in: {target_path}")
     installed = install_hooks(target_path, providers=providers)
@@ -38,7 +55,8 @@ def cmd_install(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Handles the status command."""
-    target_path = Path(args.path).resolve() if args.path else Path.cwd().resolve()
+    target = args.path or getattr(args, "target_path", None)
+    target_path = Path(target).resolve() if target else Path.cwd().resolve()
     memory_dir = target_path / MEMORY_DIR_NAME
     if not memory_dir.is_dir():
         print(f"No .memory directory found in {target_path}. Run 'memory-hook install' first.")
@@ -67,7 +85,8 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_inspect(args: argparse.Namespace) -> None:
     """Inspects recent entries in short.log or long.log."""
-    target_path = Path(args.path).resolve() if args.path else Path.cwd().resolve()
+    target = args.path or getattr(args, "target_path", None)
+    target_path = Path(target).resolve() if target else Path.cwd().resolve()
     memory_dir = target_path / MEMORY_DIR_NAME
     short_log = memory_dir / SHORT_LOG_NAME
     long_log = memory_dir / LONG_LOG_NAME
@@ -99,6 +118,32 @@ def cmd_inspect(args: argparse.Namespace) -> None:
             print(line.strip())
 
 
+def cmd_run(args: argparse.Namespace) -> None:
+    """Handles the run command by delegating directly to run_hook."""
+    raw_input_data = ""
+    try:
+        if not sys.stdin.isatty():
+            raw_input_data = sys.stdin.read()
+    except Exception:
+        raw_input_data = ""
+
+    try:
+        root_path = Path(args.root).resolve() if args.root else None
+        result = run_hook(
+            event_hint=args.event,
+            provider_hint=args.provider,
+            raw_input_data=raw_input_data,
+            project_root=root_path,
+        )
+        sys.stdout.write(json.dumps(result))
+        sys.stdout.flush()
+    except Exception as exc:
+        sys.stderr.write(f"memory-hook runner warning: {exc}\n")
+        sys.stderr.flush()
+        sys.stdout.write(json.dumps({"status": "ok", "decision": "allow"}))
+        sys.stdout.flush()
+
+
 def main() -> None:
     """Main CLI entrypoint."""
     parser = argparse.ArgumentParser(
@@ -109,6 +154,7 @@ def main() -> None:
 
     # install
     install_p = subparsers.add_parser("install", help="Install memory-hook into a project")
+    install_p.add_argument("target_path", nargs="?", default=None, help="Target project root directory")
     install_p.add_argument("--path", type=str, help="Target project root directory (defaults to current dir)")
     install_p.add_argument(
         "--provider",
@@ -120,10 +166,12 @@ def main() -> None:
 
     # status
     status_p = subparsers.add_parser("status", help="Show memory-hook health and counters")
+    status_p.add_argument("target_path", nargs="?", default=None, help="Target project directory")
     status_p.add_argument("--path", type=str, help="Target project directory")
 
     # inspect
     inspect_p = subparsers.add_parser("inspect", help="Inspect short.log or long.log entries")
+    inspect_p.add_argument("target_path", nargs="?", default=None, help="Target project directory")
     inspect_p.add_argument("--path", type=str, help="Target project directory")
     inspect_p.add_argument("--tail", type=int, default=10, help="Number of recent short.log events to show")
     inspect_p.add_argument("--long", action="store_true", help="Print long.log content instead")
@@ -143,7 +191,7 @@ def main() -> None:
     elif args.subcommand == "inspect":
         cmd_inspect(args)
     elif args.subcommand == "run":
-        runner_main()
+        cmd_run(args)
     else:
         parser.print_help()
 

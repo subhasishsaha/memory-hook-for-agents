@@ -4,14 +4,13 @@ const { spawn } = require("child_process");
 const path = require("path");
 
 const rootDir = path.resolve(__dirname, "..");
-const pythonScript = path.join(rootDir, "memory_hook", "cli.py");
-const args = [pythonScript, ...process.argv.slice(2)];
-
 const pythonCmd = process.platform === "win32" ? "python" : "python3";
+const args = ["-m", "memory_hook.cli", ...process.argv.slice(2)];
 
 const child = spawn(pythonCmd, args, {
+  cwd: rootDir,
   stdio: "inherit",
-  shell: true,
+  shell: false,
 });
 
 child.on("exit", (code) => {

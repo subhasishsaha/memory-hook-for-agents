@@ -48,13 +48,16 @@ def truncate_string(val: Any, max_len: int = MAX_PAYLOAD_STRING_LENGTH) -> Tuple
 
 def detect_provider(raw_payload: Dict[str, Any], hint: Optional[str] = None) -> str:
     """Infers the agent provider from CLI hint or payload characteristics."""
-    if hint and hint.lower() in [
-        PROVIDER_ANTIGRAVITY,
-        PROVIDER_CLAUDE,
-        PROVIDER_CODEX,
-        PROVIDER_CURSOR,
-    ]:
-        return hint.lower()
+    if hint:
+        h = hint.lower().strip()
+        if h in [PROVIDER_CLAUDE, "claude"]:
+            return PROVIDER_CLAUDE
+        if h in [PROVIDER_ANTIGRAVITY, "gemini"]:
+            return PROVIDER_ANTIGRAVITY
+        if h in [PROVIDER_CODEX, "openai"]:
+            return PROVIDER_CODEX
+        if h in [PROVIDER_CURSOR, "cursor"]:
+            return PROVIDER_CURSOR
 
     if "conversationId" in raw_payload or "artifactDirectoryPath" in raw_payload:
         return PROVIDER_ANTIGRAVITY

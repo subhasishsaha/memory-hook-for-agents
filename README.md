@@ -68,12 +68,12 @@ When installed into a project, `memory-hook` creates:
 
 #### Linux / macOS:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/username/memory-hook/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/memory-hook/memory-hook/main/install.sh | bash
 ```
 
 #### Windows (PowerShell):
 ```powershell
-irm https://raw.githubusercontent.com/username/memory-hook/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/memory-hook/memory-hook/main/install.ps1 | iex
 ```
 
 ---

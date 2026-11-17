@@ -8,14 +8,13 @@ version = "0.1.0"
 description = "Downloadable cross-provider memory hook for Claude Code, Antigravity, OpenAI Codex, and Cursor."
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Memory Hook Contributors"}
 ]
 keywords = ["ai", "agents", "claude", "antigravity", "codex", "cursor", "hooks", "memory", "llm"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 
