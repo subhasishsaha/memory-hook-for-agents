@@ -140,6 +140,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--event", type=str, default="")
     parser.add_argument("--provider", type=str, default="")
+    parser.add_argument("--root", type=str, default="")
     args = parser.parse_args()
 
     raw_in = ""
@@ -156,7 +157,7 @@ def main():
         except Exception:
             raw_payload = {"raw": raw_in}
 
-    root = find_project_root()
+    root = Path(args.root).resolve() if args.root else find_project_root()
     mem_dir = root / MEMORY_DIR_NAME
     mem_dir.mkdir(parents=True, exist_ok=True)
 
@@ -258,7 +259,8 @@ def install_antigravity(project_root: Path) -> List[Path]:
     agents_dir.mkdir(parents=True, exist_ok=True)
     hooks_file = agents_dir / "hooks.json"
 
-    runner_rel = ".memory/bin/memory_hook_runner.py"
+    root_abs = project_root.resolve().as_posix()
+    runner_abs = (project_root / ".memory" / "bin" / RUNNER_SCRIPT_NAME).resolve().as_posix()
 
     existing_hooks: Dict[str, Any] = {}
     if hooks_file.is_file():
@@ -272,7 +274,7 @@ def install_antigravity(project_root: Path) -> List[Path]:
         "PreInvocation": [
             {
                 "type": "command",
-                "command": f"python {runner_rel} --provider antigravity --event PreInvocation"
+                "command": f'python "{runner_abs}" --provider antigravity --event PreInvocation --root "{root_abs}"'
             }
         ],
         "PreToolUse": [
@@ -281,7 +283,7 @@ def install_antigravity(project_root: Path) -> List[Path]:
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f"python {runner_rel} --provider antigravity --event PreToolUse"
+                        "command": f'python "{runner_abs}" --provider antigravity --event PreToolUse --root "{root_abs}"'
                     }
                 ]
             }
@@ -292,7 +294,7 @@ def install_antigravity(project_root: Path) -> List[Path]:
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f"python {runner_rel} --provider antigravity --event PostToolUse"
+                        "command": f'python "{runner_abs}" --provider antigravity --event PostToolUse --root "{root_abs}"'
                     }
                 ]
             }
@@ -300,7 +302,7 @@ def install_antigravity(project_root: Path) -> List[Path]:
         "Stop": [
             {
                 "type": "command",
-                "command": f"python {runner_rel} --provider antigravity --event Stop"
+                "command": f'python "{runner_abs}" --provider antigravity --event Stop --root "{root_abs}"'
             }
         ]
     }
@@ -331,7 +333,8 @@ def install_claude(project_root: Path) -> List[Path]:
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_file = claude_dir / "settings.json"
 
-    runner_rel = ".memory/bin/memory_hook_runner.py"
+    root_abs = project_root.resolve().as_posix()
+    runner_abs = (project_root / ".memory" / "bin" / RUNNER_SCRIPT_NAME).resolve().as_posix()
 
     existing_settings: Dict[str, Any] = {}
     if settings_file.is_file():
@@ -349,7 +352,7 @@ def install_claude(project_root: Path) -> List[Path]:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"python {runner_rel} --provider claude-code --event UserPromptSubmit"
+                    "command": f'python "{runner_abs}" --provider claude-code --event UserPromptSubmit --root "{root_abs}"'
                 }
             ]
         }
@@ -360,7 +363,7 @@ def install_claude(project_root: Path) -> List[Path]:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"python {runner_rel} --provider claude-code --event PreToolUse"
+                    "command": f'python "{runner_abs}" --provider claude-code --event PreToolUse --root "{root_abs}"'
                 }
             ]
         }
@@ -371,7 +374,7 @@ def install_claude(project_root: Path) -> List[Path]:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"python {runner_rel} --provider claude-code --event PostToolUse"
+                    "command": f'python "{runner_abs}" --provider claude-code --event PostToolUse --root "{root_abs}"'
                 }
             ]
         }
@@ -382,7 +385,7 @@ def install_claude(project_root: Path) -> List[Path]:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"python {runner_rel} --provider claude-code --event Stop"
+                    "command": f'python "{runner_abs}" --provider claude-code --event Stop --root "{root_abs}"'
                 }
             ]
         }
@@ -414,7 +417,8 @@ def install_codex(project_root: Path) -> List[Path]:
     codex_dir.mkdir(parents=True, exist_ok=True)
     hooks_file = codex_dir / "hooks.json"
 
-    runner_rel = ".memory/bin/memory_hook_runner.py"
+    root_abs = project_root.resolve().as_posix()
+    runner_abs = (project_root / ".memory" / "bin" / RUNNER_SCRIPT_NAME).resolve().as_posix()
 
     existing_hooks: Dict[str, Any] = {}
     if hooks_file.is_file():
@@ -425,16 +429,16 @@ def install_codex(project_root: Path) -> List[Path]:
             existing_hooks = {}
 
     existing_hooks["UserPromptSubmit"] = [
-        {"type": "command", "command": f"python {runner_rel} --provider codex --event UserPromptSubmit"}
+        {"type": "command", "command": f'python "{runner_abs}" --provider codex --event UserPromptSubmit --root "{root_abs}"'}
     ]
     existing_hooks["PreToolUse"] = [
-        {"type": "command", "command": f"python {runner_rel} --provider codex --event PreToolUse"}
+        {"type": "command", "command": f'python "{runner_abs}" --provider codex --event PreToolUse --root "{root_abs}"'}
     ]
     existing_hooks["PostToolUse"] = [
-        {"type": "command", "command": f"python {runner_rel} --provider codex --event PostToolUse"}
+        {"type": "command", "command": f'python "{runner_abs}" --provider codex --event PostToolUse --root "{root_abs}"'}
     ]
     existing_hooks["Stop"] = [
-        {"type": "command", "command": f"python {runner_rel} --provider codex --event Stop"}
+        {"type": "command", "command": f'python "{runner_abs}" --provider codex --event Stop --root "{root_abs}"'}
     ]
 
     with open(hooks_file, "w", encoding="utf-8") as f:
@@ -461,7 +465,8 @@ def install_cursor(project_root: Path) -> List[Path]:
     cursor_dir.mkdir(parents=True, exist_ok=True)
     hooks_file = cursor_dir / "hooks.json"
 
-    runner_rel = ".memory/bin/memory_hook_runner.py"
+    root_abs = project_root.resolve().as_posix()
+    runner_abs = (project_root / ".memory" / "bin" / RUNNER_SCRIPT_NAME).resolve().as_posix()
 
     existing_hooks: Dict[str, Any] = {}
     if hooks_file.is_file():
@@ -472,16 +477,16 @@ def install_cursor(project_root: Path) -> List[Path]:
             existing_hooks = {}
 
     existing_hooks["beforeSubmitPrompt"] = [
-        {"command": f"python {runner_rel} --provider cursor --event beforeSubmitPrompt"}
+        {"command": f'python "{runner_abs}" --provider cursor --event beforeSubmitPrompt --root "{root_abs}"'}
     ]
     existing_hooks["preToolUse"] = [
-        {"command": f"python {runner_rel} --provider cursor --event preToolUse"}
+        {"command": f'python "{runner_abs}" --provider cursor --event preToolUse --root "{root_abs}"'}
     ]
     existing_hooks["postToolUse"] = [
-        {"command": f"python {runner_rel} --provider cursor --event postToolUse"}
+        {"command": f'python "{runner_abs}" --provider cursor --event postToolUse --root "{root_abs}"'}
     ]
     existing_hooks["stop"] = [
-        {"command": f"python {runner_rel} --provider cursor --event stop"}
+        {"command": f'python "{runner_abs}" --provider cursor --event stop --root "{root_abs}"'}
     ]
 
     with open(hooks_file, "w", encoding="utf-8") as f:

@@ -36,6 +36,9 @@ class TestInstaller(unittest.TestCase):
             self.assertIn("memory-hook", hooks)
             self.assertIn("PreInvocation", hooks["memory-hook"])
             self.assertIn("PreToolUse", hooks["memory-hook"])
+            cmd = hooks["memory-hook"]["PreInvocation"][0]["command"]
+            self.assertIn(self.root.resolve().as_posix(), cmd)
+            self.assertIn("--root", cmd)
 
         # Check Claude Code files
         settings_json = self.root / ".claude" / "settings.json"

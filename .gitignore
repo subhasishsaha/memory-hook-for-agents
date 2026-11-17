@@ -28,3 +28,13 @@ htmlcov/
 
 # Audit artifacts (repo-publish-prep)
 .audit/
+
+# Local testing hook artifacts
+.agents/
+.claude/
+.codex/
+.cursor/
+.cursorrules
+AGENTS.md
+CLAUDE.md
+CODEX.md

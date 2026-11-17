@@ -156,6 +156,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--event", type=str, default="")
     parser.add_argument("--provider", type=str, default="")
+    parser.add_argument("--root", type=str, default="")
     args = parser.parse_args()
 
     raw_in = ""
@@ -172,7 +173,7 @@ def main():
         except Exception:
             raw_payload = {"raw": raw_in}
 
-    root = find_project_root()
+    root = Path(args.root).resolve() if args.root else find_project_root()
     mem_dir = root / MEMORY_DIR_NAME
     mem_dir.mkdir(parents=True, exist_ok=True)
 
@@ -277,7 +278,8 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
    - Whenever you receive a `[MEMORY HOOK UPDATE NOTICE]`, review `.memory/short.log` and update `.memory/long.log`.
 """
 
-    runner_rel = ".memory/bin/memory_hook_runner.py"
+    root_abs = target_dir.resolve().as_posix()
+    runner_abs = (target_dir / ".memory" / "bin" / "memory_hook_runner.py").resolve().as_posix()
 
     # Antigravity
     agents_dir = target_dir / ".agents"
@@ -287,10 +289,10 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
         json.dumps(
             {
                 "memory-hook": {
-                    "PreInvocation": [{"type": "command", "command": f"python {runner_rel} --provider antigravity --event PreInvocation"}],
-                    "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f"python {runner_rel} --provider antigravity --event PreToolUse"}]}],
-                    "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f"python {runner_rel} --provider antigravity --event PostToolUse"}]}],
-                    "Stop": [{"type": "command", "command": f"python {runner_rel} --provider antigravity --event Stop"}]
+                    "PreInvocation": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PreInvocation --root "{root_abs}"'}],
+                    "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PreToolUse --root "{root_abs}"'}]}],
+                    "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PostToolUse --root "{root_abs}"'}]}],
+                    "Stop": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event Stop --root "{root_abs}"'}]
                 }
             },
             indent=2,
@@ -307,10 +309,10 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
         json.dumps(
             {
                 "hooks": {
-                    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": f"python {runner_rel} --provider claude-code --event UserPromptSubmit"}]}],
-                    "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f"python {runner_rel} --provider claude-code --event PreToolUse"}]}],
-                    "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f"python {runner_rel} --provider claude-code --event PostToolUse"}]}],
-                    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": f"python {runner_rel} --provider claude-code --event Stop"}]}]
+                    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event UserPromptSubmit --root "{root_abs}"'}]}],
+                    "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PreToolUse --root "{root_abs}"'}]}],
+                    "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PostToolUse --root "{root_abs}"'}]}],
+                    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event Stop --root "{root_abs}"'}]}]
                 }
             },
             indent=2,
@@ -326,10 +328,10 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
     codex_hooks.write_text(
         json.dumps(
             {
-                "UserPromptSubmit": [{"type": "command", "command": f"python {runner_rel} --provider codex --event UserPromptSubmit"}],
-                "PreToolUse": [{"type": "command", "command": f"python {runner_rel} --provider codex --event PreToolUse"}],
-                "PostToolUse": [{"type": "command", "command": f"python {runner_rel} --provider codex --event PostToolUse"}],
-                "Stop": [{"type": "command", "command": f"python {runner_rel} --provider codex --event Stop"}]
+                "UserPromptSubmit": [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event UserPromptSubmit --root "{root_abs}"'}],
+                "PreToolUse": [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PreToolUse --root "{root_abs}"'}],
+                "PostToolUse": [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PostToolUse --root "{root_abs}"'}],
+                "Stop": [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event Stop --root "{root_abs}"'}]
             },
             indent=2,
         ),
@@ -344,10 +346,10 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
     cursor_hooks.write_text(
         json.dumps(
             {
-                "beforeSubmitPrompt": [{"command": f"python {runner_rel} --provider cursor --event beforeSubmitPrompt"}],
-                "preToolUse": [{"command": f"python {runner_rel} --provider cursor --event preToolUse"}],
-                "postToolUse": [{"command": f"python {runner_rel} --provider cursor --event postToolUse"}],
-                "stop": [{"command": f"python {runner_rel} --provider cursor --event stop"}]
+                "beforeSubmitPrompt": [{"command": f'python "{runner_abs}" --provider cursor --event beforeSubmitPrompt --root "{root_abs}"'}],
+                "preToolUse": [{"command": f'python "{runner_abs}" --provider cursor --event preToolUse --root "{root_abs}"'}],
+                "postToolUse": [{"command": f'python "{runner_abs}" --provider cursor --event postToolUse --root "{root_abs}"'}],
+                "stop": [{"command": f'python "{runner_abs}" --provider cursor --event stop --root "{root_abs}"'}]
             },
             indent=2,
         ),
