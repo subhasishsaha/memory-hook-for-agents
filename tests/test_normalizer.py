@@ -106,6 +106,30 @@ class TestNormalizer(unittest.TestCase):
         self.assertEqual(event_post["type"], EVENT_TOOL_RESULT)
         self.assertEqual(event_post["payload"]["status"], "success")
 
+    def test_normalize_antigravity_stop_with_transcript(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            log_dir = Path(td) / "logs"
+            log_dir.mkdir(parents=True)
+            transcript_file = log_dir / "transcript.jsonl"
+            with open(transcript_file, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"type": "USER_INPUT", "content": "What is status?"}) + "\n")
+                f.write(json.dumps({"type": "PLANNER_RESPONSE", "source": "MODEL", "content": "Everything is running smoothly."}) + "\n")
+
+            raw_stop = {
+                "conversationId": "conv-stop-1",
+                "hookEventName": "Stop",
+                "transcriptPath": str(transcript_file),
+                "executionNum": 1,
+                "terminationReason": "NO_TOOL_CALL",
+            }
+            event = normalize_event(raw_stop, event_hint="Stop", provider_hint=PROVIDER_ANTIGRAVITY)
+            self.assertEqual(event["type"], EVENT_MODEL_RESPONSE)
+            self.assertEqual(event["payload"]["content"], "Everything is running smoothly.")
+
 
 if __name__ == "__main__":
     unittest.main()

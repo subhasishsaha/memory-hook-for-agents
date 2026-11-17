@@ -19,6 +19,57 @@ from .constants import (
 )
 
 
+def extract_model_response(raw_payload: Dict[str, Any]) -> str:
+    """Extracts model response text from direct fields or agent transcript files."""
+    # 1. Direct fields
+    for k in [
+        "response",
+        "last_assistant_message",
+        "last_response",
+        "assistant_message",
+        "text",
+        "output",
+    ]:
+        val = raw_payload.get(k)
+        if isinstance(val, str) and val.strip():
+            return val
+        elif isinstance(val, dict) and val.get("content"):
+            return str(val["content"])
+
+    # 2. Antigravity / Agent transcript resolution
+    transcript_paths = []
+    tp = raw_payload.get("transcriptPath")
+    if tp:
+        p = Path(tp)
+        transcript_paths.append(p.parent / "transcript_full.jsonl")
+        transcript_paths.append(p)
+
+    cid = raw_payload.get("conversationId") or raw_payload.get("sessionId")
+    if cid:
+        home = Path.home()
+        for variant in ["antigravity-cli", "antigravity", "antigravity-ide"]:
+            log_dir = home / ".gemini" / variant / "brain" / cid / ".system_generated" / "logs"
+            transcript_paths.append(log_dir / "transcript_full.jsonl")
+            transcript_paths.append(log_dir / "transcript.jsonl")
+
+    for tp_cand in transcript_paths:
+        if tp_cand.is_file():
+            try:
+                with open(tp_cand, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                    for line in reversed(lines[-100:]):
+                        item = json.loads(line)
+                        if (
+                            item.get("type") == "PLANNER_RESPONSE"
+                            or item.get("source") == "MODEL"
+                        ) and item.get("content"):
+                            return str(item["content"])
+            except Exception:
+                continue
+
+    return ""
+
+
 def truncate_string(val: Any, max_len: int = MAX_PAYLOAD_STRING_LENGTH) -> Tuple[Any, bool]:
     """Truncates string values if they exceed maximum length, flagging truncation."""
     if isinstance(val, str):
@@ -139,23 +190,7 @@ def normalize_event(
 
         elif event_name in ["Stop", "PostInvocation"]:
             event_type = EVENT_MODEL_RESPONSE
-            # Attempt to extract last assistant text from transcript if available
-            response_text = ""
-            transcript_path = raw_payload.get("transcriptPath")
-            if transcript_path and Path(transcript_path).is_file():
-                try:
-                    with open(transcript_path, "r", encoding="utf-8") as f:
-                        lines = f.readlines()
-                        for line in reversed(lines[-20:]):
-                            item = json.loads(line)
-                            if item.get("type") == "PLANNER_RESPONSE" or item.get("source") == "MODEL":
-                                response_text = item.get("content") or ""
-                                if response_text:
-                                    break
-                except Exception:
-                    pass
-            if not response_text:
-                response_text = raw_payload.get("response") or raw_payload.get("last_response") or ""
+            response_text = extract_model_response(raw_payload)
             resp_trunc, was_trunc = truncate_string(response_text)
             payload = {"content": resp_trunc}
             is_truncated = was_trunc
@@ -195,7 +230,7 @@ def normalize_event(
 
         elif event_name in ["Stop", "SessionEnd"]:
             event_type = EVENT_MODEL_RESPONSE
-            resp_text = raw_payload.get("last_assistant_message") or raw_payload.get("response") or ""
+            resp_text = extract_model_response(raw_payload)
             resp_trunc, was_trunc = truncate_string(resp_text)
             payload = {"content": resp_trunc}
             is_truncated = was_trunc
@@ -235,7 +270,7 @@ def normalize_event(
 
         elif "response" in lower_event or "stop" in lower_event:
             event_type = EVENT_MODEL_RESPONSE
-            resp_text = raw_payload.get("response") or raw_payload.get("content") or raw_payload.get("text") or ""
+            resp_text = extract_model_response(raw_payload)
             resp_trunc, was_trunc = truncate_string(resp_text)
             payload = {"content": resp_trunc}
             is_truncated = was_trunc

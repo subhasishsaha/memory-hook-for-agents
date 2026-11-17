@@ -127,6 +127,42 @@ def truncate_string(val, max_len=MAX_PAYLOAD_STRING_LENGTH):
         return new_l, trunc
     return val, False
 
+def extract_model_response(raw_payload):
+    for k in ["response", "last_assistant_message", "last_response", "assistant_message", "text", "output"]:
+        val = raw_payload.get(k)
+        if isinstance(val, str) and val.strip():
+            return val
+        elif isinstance(val, dict) and val.get("content"):
+            return str(val["content"])
+
+    transcript_paths = []
+    tp = raw_payload.get("transcriptPath")
+    if tp:
+        p = Path(tp)
+        transcript_paths.append(p.parent / "transcript_full.jsonl")
+        transcript_paths.append(p)
+
+    cid = raw_payload.get("conversationId") or raw_payload.get("sessionId")
+    if cid:
+        home = Path.home()
+        for variant in ["antigravity-cli", "antigravity", "antigravity-ide"]:
+            log_dir = home / ".gemini" / variant / "brain" / cid / ".system_generated" / "logs"
+            transcript_paths.append(log_dir / "transcript_full.jsonl")
+            transcript_paths.append(log_dir / "transcript.jsonl")
+
+    for tp_cand in transcript_paths:
+        if tp_cand.is_file():
+            try:
+                with open(tp_cand, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                    for line in reversed(lines[-100:]):
+                        item = json.loads(line)
+                        if (item.get("type") == "PLANNER_RESPONSE" or item.get("source") == "MODEL") and item.get("content"):
+                            return str(item["content"])
+            except Exception:
+                continue
+    return ""
+
 def find_project_root():
     cur = Path(__file__).resolve().parent
     for p in [cur] + list(cur.parents):
@@ -204,7 +240,7 @@ def main():
         }
     elif "stop" in evt or "response" in evt:
         event_type = "model_response"
-        payload = {"content": raw_payload.get("response") or raw_payload.get("last_assistant_message") or ""}
+        payload = {"content": extract_model_response(raw_payload)}
     else:
         event_type = "user_request"
         payload = {"content": raw_payload.get("lastUserInput") or raw_payload.get("prompt") or raw_payload.get("text") or raw_in}
