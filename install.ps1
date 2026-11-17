@@ -11,5 +11,6 @@ if (-not (Get-Command "python" -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-python -m pip install --quiet memory-hook
-python -m memory_hook.cli install $TargetDir
+$InstallPyUrl = "https://raw.githubusercontent.com/subhasishsaha/memory-hook-for-agents/main/install.py"
+$ScriptContent = (Invoke-RestMethod -Uri $InstallPyUrl -UseBasicParsing)
+$ScriptContent | python - $TargetDir

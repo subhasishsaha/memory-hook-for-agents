@@ -14,5 +14,5 @@ else
     exit 1
 fi
 
-"$PYTHON_CMD" -m pip install --quiet memory-hook
-"$PYTHON_CMD" -m memory_hook.cli install "$TARGET_DIR"
+INSTALL_PY_URL="https://raw.githubusercontent.com/subhasishsaha/memory-hook-for-agents/main/install.py"
+curl -fsSL "$INSTALL_PY_URL" | "$PYTHON_CMD" - "$TARGET_DIR"

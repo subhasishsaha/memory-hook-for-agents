@@ -81,8 +81,8 @@ irm https://raw.githubusercontent.com/subhasishsaha/memory-hook-for-agents/main/
 ### Option 2: Python / Pip
 
 ```bash
-# Install globally or in virtualenv
-pip install memory-hook
+# Install from GitHub
+pip install git+https://github.com/subhasishsaha/memory-hook-for-agents.git
 
 # Install into current project
 memory-hook install

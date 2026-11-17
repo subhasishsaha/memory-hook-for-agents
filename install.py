@@ -91,20 +91,168 @@ def _standalone_install(target_dir: Path) -> dict:
     runner_script = bin_dir / "memory_hook_runner.py"
     runner_code = '''#!/usr/bin/env python3
 """Zero-dependency self-contained memory hook runner for .memory/"""
-import argparse, json, os, sys
+import argparse
+import json
+import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+MEMORY_DIR_NAME = ".memory"
+SHORT_LOG_NAME = "short.log"
+STATE_FILE_NAME = "state.json"
+DEFAULT_COMPACT_INTERVAL = 10
+MAX_PAYLOAD_STRING_LENGTH = 16384
+
+def truncate_string(val, max_len=MAX_PAYLOAD_STRING_LENGTH):
+    if isinstance(val, str):
+        if len(val) > max_len:
+            return val[:max_len] + f"\\n... [truncated {len(val) - max_len} chars]", True
+        return val, False
+    elif isinstance(val, dict):
+        trunc = False
+        new_d = {}
+        for k, v in val.items():
+            nv, tr = truncate_string(v, max_len)
+            new_d[k] = nv
+            if tr: trunc = True
+        return new_d, trunc
+    elif isinstance(val, list):
+        trunc = False
+        new_l = []
+        for it in val:
+            ni, tr = truncate_string(it, max_len)
+            new_l.append(ni)
+            if tr: trunc = True
+        return new_l, trunc
+    return val, False
+
+def find_project_root():
+    cur = Path(__file__).resolve().parent
+    for p in [cur] + list(cur.parents):
+        if (p / MEMORY_DIR_NAME).is_dir():
+            return p
+    return Path.cwd().resolve()
+
+def load_state(mem_dir):
+    sf = mem_dir / STATE_FILE_NAME
+    if sf.is_file():
+        try:
+            with open(sf, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"version": 1, "current_seq": 0, "last_compacted_seq": 0, "total_events": 0}
+
+def save_state(mem_dir, data):
+    sf = mem_dir / STATE_FILE_NAME
+    try:
+        with open(sf, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--event", type=str, default="")
     parser.add_argument("--provider", type=str, default="")
-    parser.add_argument("--root", type=str, default="")
     args = parser.parse_args()
-    root = Path(args.root).resolve() if args.root else Path.cwd().resolve()
-    mem_dir = root / ".memory"
+
+    raw_in = ""
+    try:
+        if not sys.stdin.isatty():
+            raw_in = sys.stdin.read()
+    except Exception:
+        pass
+
+    raw_payload = {}
+    if raw_in:
+        try:
+            raw_payload = json.loads(raw_in)
+        except Exception:
+            raw_payload = {"raw": raw_in}
+
+    root = find_project_root()
+    mem_dir = root / MEMORY_DIR_NAME
     mem_dir.mkdir(parents=True, exist_ok=True)
-    resp = {"decision": "allow"} if args.provider == "antigravity" and args.event in ["PreToolUse", "Stop"] else {"status": "ok"}
+
+    state = load_state(mem_dir)
+    seq = state.get("current_seq", 0) + 1
+    state["current_seq"] = seq
+    state["total_events"] = state.get("total_events", 0) + 1
+    state["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
+    if args.provider:
+        state["last_updated_provider"] = args.provider
+
+    # Determine event type
+    evt = args.event.lower()
+    event_type = "user_request"
+    payload = {}
+    is_trunc = False
+
+    if "pretool" in evt:
+        event_type = "tool_call"
+        tc = raw_payload.get("toolCall") or raw_payload.get("tool_input") or {}
+        payload = {"tool": raw_payload.get("tool_name") or raw_payload.get("name") or "tool", "args": tc}
+    elif "posttool" in evt:
+        event_type = "tool_result"
+        payload = {
+            "status": "error" if raw_payload.get("error") else "success",
+            "output": raw_payload.get("tool_response") or raw_payload.get("result") or raw_payload.get("output") or "",
+            "error": raw_payload.get("error")
+        }
+    elif "stop" in evt or "response" in evt:
+        event_type = "model_response"
+        payload = {"content": raw_payload.get("response") or raw_payload.get("last_assistant_message") or ""}
+    else:
+        event_type = "user_request"
+        payload = {"content": raw_payload.get("lastUserInput") or raw_payload.get("prompt") or raw_payload.get("text") or raw_in}
+
+    payload, is_trunc = truncate_string(payload)
+
+    record = {
+        "seq": seq,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "provider": args.provider or "generic",
+        "session_id": raw_payload.get("conversationId") or raw_payload.get("sessionId") or "unknown",
+        "turn_id": raw_payload.get("stepIdx") or raw_payload.get("invocationNum"),
+        "type": event_type,
+        "payload": payload,
+        "truncated": is_trunc
+    }
+
+    # Append to short.log
+    with open(mem_dir / SHORT_LOG_NAME, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\\n")
+
+    # Compaction check
+    last_compact = state.get("last_compacted_seq", 0)
+    compaction_due = (seq - last_compact) >= DEFAULT_COMPACT_INTERVAL
+    notice = (
+        f"[MEMORY HOOK UPDATE NOTICE]: {seq - last_compact} actions elapsed since last long.log update. "
+        f"Action Required: Review uncompacted entries in .memory/short.log and update .memory/long.log."
+    )
+
+    resp = {}
+    if args.provider == "antigravity":
+        if args.event == "PreToolUse":
+            resp = {"decision": "allow"}
+        elif args.event in ["PreInvocation", "SessionStart"]:
+            if compaction_due:
+                resp = {"injectSteps": [{"systemMessage": {"systemMessage": notice}}]}
+                state["last_compacted_seq"] = seq
+            else:
+                resp = {}
+        elif args.event == "Stop":
+            resp = {"decision": "allow"}
+    else:
+        if compaction_due:
+            sys.stderr.write(f"\\n{notice}\\n")
+            sys.stderr.flush()
+            state["last_compacted_seq"] = seq
+        resp = {"status": "ok"}
+
+    save_state(mem_dir, state)
     sys.stdout.write(json.dumps(resp))
     sys.stdout.flush()
 
