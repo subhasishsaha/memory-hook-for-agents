@@ -6,6 +6,12 @@
   "bin": {
     "memory-hook": "bin/index.js"
   },
+  "files": [
+    "bin",
+    "memory_hook",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "python -m unittest discover tests"
   },
