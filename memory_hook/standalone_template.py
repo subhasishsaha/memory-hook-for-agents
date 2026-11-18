@@ -184,11 +184,14 @@ def recover_from_short_log(mem_dir, state):
         state["current_seq"] = max_seq
         state["window_start_seq"] = min_seq if min_seq is not None else 1
         state["short_log_tokens"] = tokens_sum
+        state["retained_events"] = event_count
         state["total_events"] = max(state.get("total_events", 0), event_count)
         if min_seq is not None and min_seq <= 1:
             state["total_lifetime_tokens"] = tokens_sum
+            state["lifetime_tokens_exact"] = True
         else:
             state["total_lifetime_tokens"] = max(state.get("total_lifetime_tokens", 0), tokens_sum)
+            state["lifetime_tokens_exact"] = False
         state["recovered_at_ts"] = datetime.now(timezone.utc).isoformat()
         if last_ts:
             state["last_updated_ts"] = last_ts

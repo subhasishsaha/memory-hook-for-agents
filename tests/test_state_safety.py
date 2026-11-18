@@ -206,6 +206,52 @@ class TestStateSafety(unittest.TestCase):
         self.assertEqual(state.short_log_tokens, 60)
         self.assertEqual(state.total_lifetime_tokens, 60)
 
+    def test_acknowledgement_lower_bound_validation_and_preservation_of_pending_request(self):
+        """Acknowledging a sequence below the requested checkpoint cannot discard the pending request."""
+        state = MemoryState(self.mem_dir)
+        records = [
+            {"seq": i, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 100}
+            for i in range(1, 101)
+        ]
+        self.short_log.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        state.data["current_seq"] = 100
+        state.data["total_events"] = 100
+        state.data["total_lifetime_tokens"] = 10000
+        state.data["short_log_tokens"] = 10000
+        state.data["last_compacted_seq"] = 50
+        state.data["last_compacted_tokens"] = 5000
+
+        # Pending compaction created at #100
+        state.request_compaction(seq=100, uncompacted_tokens=5000)
+        self.assertTrue(state.has_pending_compaction())
+
+        # 1. Unforced acknowledgement below checkpoint #100 must be rejected
+        with self.assertRaises(ValueError) as ctx:
+            state.acknowledge_compaction(seq=60, force=False)
+        self.assertIn("below active pending compaction checkpoint #100", str(ctx.exception))
+        self.assertTrue(state.has_pending_compaction())
+        self.assertEqual(state.last_compacted_seq, 50)
+
+        # 2. Forced acknowledgement of #60 advances sequence, but MUST NOT discard pending compaction #100
+        success = state.acknowledge_compaction(seq=60, force=True)
+        self.assertTrue(success)
+        self.assertEqual(state.last_compacted_seq, 60)
+        # Invariant: compaction through #100 is still unfinished and must remain pending!
+        self.assertTrue(state.has_pending_compaction())
+        self.assertEqual(state.pending_compaction["requested_at_seq"], 100)
+
+        # 3. An acknowledgement older than last_compacted_seq (e.g. #40) is a no-op and never clears pending state
+        noop_res = state.acknowledge_compaction(seq=40, force=True)
+        self.assertFalse(noop_res)
+        self.assertEqual(state.last_compacted_seq, 60)
+        self.assertTrue(state.has_pending_compaction())
+
+        # 4. Acknowledging #100 satisfies the checkpoint and finally clears pending compaction
+        complete_res = state.acknowledge_compaction(seq=100)
+        self.assertTrue(complete_res)
+        self.assertEqual(state.last_compacted_seq, 100)
+        self.assertFalse(state.has_pending_compaction())
+
 
 if __name__ == "__main__":
     unittest.main()

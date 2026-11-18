@@ -383,7 +383,7 @@ class MemoryState:
         else:
             target_seq = int(seq)
 
-        # Validation 1: cannot acknowledge beyond pending checkpoint without force=True
+        # Validation 1: Upper bound against pending request (unless forced)
         if has_pending and not force:
             requested_seq = int(pc.get("requested_at_seq", 0))
             if target_seq > requested_seq:
@@ -391,7 +391,16 @@ class MemoryState:
                     f"Cannot acknowledge sequence #{target_seq} beyond pending compaction checkpoint #{requested_seq}. Pass force=True to override."
                 )
 
-        # Validation 2: cannot acknowledge sequences beyond current or known sequences
+        # Validation 2: Lower bound against pending request (unless forced)
+        if has_pending and not force:
+            requested_seq = int(pc.get("requested_at_seq", 0))
+            if target_seq < requested_seq:
+                raise ValueError(
+                    f"Cannot acknowledge sequence #{target_seq} below active pending compaction checkpoint #{requested_seq}. "
+                    f"Action Required: Complete synthesis through #{requested_seq} or pass force=True."
+                )
+
+        # Validation 3: cannot acknowledge sequences beyond current or known sequences
         max_valid_seq = max(
             self.current_seq,
             self.last_compacted_seq,
@@ -402,19 +411,22 @@ class MemoryState:
                 f"Cannot acknowledge sequence #{target_seq} ahead of current sequence #{max_valid_seq}"
             )
 
-        # If already at or beyond target_seq and no compaction is pending, no-op
-        if target_seq <= self.last_compacted_seq and not has_pending:
-            return False
-
-        if target_seq < self.last_compacted_seq:
-            self.data["pending_compaction"] = None
-            self.save()
+        # If already at or before target_seq, this is a no-op (never discard pending compaction)
+        if target_seq <= self.last_compacted_seq:
             return False
 
         self.data["last_compacted_seq"] = target_seq
         self.data["last_compacted_tokens"] = self.tokens_at_seq(target_seq)
         self.data["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
-        self.data["pending_compaction"] = None
+
+        # Only clear pending_compaction if this acknowledgement satisfies (>=) the requested checkpoint
+        if has_pending:
+            requested_seq = int(pc.get("requested_at_seq", 0))
+            if target_seq >= requested_seq:
+                self.data["pending_compaction"] = None
+        else:
+            self.data["pending_compaction"] = None
+
         self.save()
         return True
 
