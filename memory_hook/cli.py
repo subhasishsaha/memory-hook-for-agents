@@ -143,8 +143,9 @@ def cmd_acknowledge(args: argparse.Namespace) -> None:
 
     state = MemoryState(memory_dir)
     target_seq = args.seq or state.current_seq
+    force = getattr(args, "force", False)
     try:
-        changed = state.acknowledge_compaction(target_seq)
+        changed = state.acknowledge_compaction(target_seq, force=force)
         if changed:
             print(f"[SUCCESS] Compaction acknowledged through event #{state.last_compacted_seq}.")
         else:
@@ -180,11 +181,32 @@ def cmd_inspect(args: argparse.Namespace) -> None:
 
     tail_count = args.tail or 10
     recent = lines[-tail_count:]
+    show_payload = getattr(args, "show_payload", False)
     print(f"--- Showing last {len(recent)} events from {SHORT_LOG_NAME} ---")
     for line in recent:
         try:
             parsed = json.loads(line)
-            print(f"[{parsed.get('seq')}] [{parsed.get('ts')}] [{parsed.get('provider')}] {parsed.get('type')}: {parsed.get('payload')}")
+            seq = parsed.get("seq")
+            ts = parsed.get("ts")
+            prov = parsed.get("provider")
+            ev_type = parsed.get("type")
+            tokens = parsed.get("tokens", 0)
+            if show_payload:
+                print(f"[{seq}] [{ts}] [{prov}] {ev_type} ({tokens} tokens): {parsed.get('payload')}")
+            else:
+                payload = parsed.get("payload") or {}
+                summary = ""
+                if isinstance(payload, dict):
+                    if "tool_name" in payload:
+                        summary = f"tool={payload.get('tool_name')}"
+                    elif "content" in payload:
+                        c = str(payload.get("content", ""))
+                        summary = f"content_len={len(c)}"
+                    else:
+                        summary = f"keys={list(payload.keys())}"
+                else:
+                    summary = f"len={len(str(payload))}"
+                print(f"[{seq}] [{ts}] [{prov}] {ev_type} ({tokens} tokens) [payload masked, pass --show-payload to view]: {summary}")
         except Exception:
             print(line.strip())
 
@@ -242,10 +264,12 @@ def main() -> None:
     status_p.add_argument("--path", type=str, help="Target project directory")
 
     # ack / acknowledge
-    ack_p = subparsers.add_parser("ack", help="Acknowledge long-term compaction through sequence")
-    ack_p.add_argument("target_path", nargs="?", default=None, help="Target project directory")
-    ack_p.add_argument("--path", type=str, help="Target project directory")
-    ack_p.add_argument("--seq", type=int, default=None, help="Sequence number to acknowledge through")
+    for ack_cmd in ["ack", "acknowledge"]:
+        ack_p = subparsers.add_parser(ack_cmd, help="Acknowledge long-term compaction through sequence")
+        ack_p.add_argument("target_path", nargs="?", default=None, help="Target project directory")
+        ack_p.add_argument("--path", type=str, help="Target project directory")
+        ack_p.add_argument("--seq", type=int, default=None, help="Sequence number to acknowledge through")
+        ack_p.add_argument("--force", action="store_true", help="Force acknowledgement beyond pending compaction checkpoint")
 
     # inspect
     inspect_p = subparsers.add_parser("inspect", help="Inspect short.log or long.log entries")
@@ -253,6 +277,7 @@ def main() -> None:
     inspect_p.add_argument("--path", type=str, help="Target project directory")
     inspect_p.add_argument("--tail", type=int, default=10, help="Number of recent short.log events to show")
     inspect_p.add_argument("--long", action="store_true", help="Print long.log content instead")
+    inspect_p.add_argument("--show-payload", action="store_true", help="Print full payload bodies (masked by default)")
 
     # runner passthrough
     run_p = subparsers.add_parser("run", help="Internal runner invoked by agent hooks")

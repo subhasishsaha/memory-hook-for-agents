@@ -33,7 +33,7 @@ Developers frequently switch between different AI agents:
 - **Compaction Acknowledgement Protocol**: Compaction requests remain `pending` until long-term memory synthesis is verified in `.memory/long.log` or explicitly acknowledged. Pending compactions are never prematurely marked as completed and automatically retry across sessions.
 - **Agentic Knowledge Synthesis (`.memory/long.log`)**: Distills project identity, architecture, active tasks, and decisions into high-density Markdown.
 - **Token-Based Compaction Trigger (10k Tokens)**: Whenever $\ge 10{,}000$ estimated tokens accumulate since the last synthesis, the hook injects a prompt directive instructing the active agent to distill recent progress into `long.log`.
-- **Non-Destructive Configuration Merging**: Merges hooks into existing `.agents/hooks.json`, `.claude/settings.json`, `.codex/hooks.json`, and `.cursor/hooks.json` files while preserving unrelated user hooks, comments, and settings. Automatically creates `.bak` backups before modifying files.
+- **Non-Destructive Configuration Merging**: Merges hooks into existing `.agents/hooks.json`, `.claude/settings.json`, `.codex/hooks.json`, and `.cursor/hooks.json` files, preserving unrelated user hooks and settings in supported JSON configuration files. Automatically creates `.bak` backups before modifying files.
 - **State Validation & Journal Recovery**: Detects corrupted `state.json` files, creates a timestamped corrupt backup (`state.json.corrupt.<ts>`), and automatically reconstructs sequence counters and token metrics directly from `short.log`.
 - **Local Bytecode Compilation & Accidental-Edit Lock**: Ships clean Python source code, compiles `.pyc` locally on the user's system at install time, deletes `.py` source, and marks `.memory/bin/memory_hook_runner.pyc` with OS-level read-only permissions (`attrib +R` / `chmod 0o555`) to prevent coding agents from accidentally modifying runner scripts.
 - **Zero Runtime Dependencies**: Works entirely with Python standard library. No external pip dependencies required at runtime.
@@ -191,11 +191,15 @@ Every intercepted event is appended as a sanitized single JSON object:
 # Check memory hook status, event counters, integrity, and pending compaction
 memory-hook status
 
-# Manually acknowledge a compaction through a specific sequence
+# Manually acknowledge a compaction through a specific sequence (use --force to override checkpoint)
 memory-hook ack --seq 50
+memory-hook ack --seq 50 --force
 
-# Inspect recent short.log events
+# Inspect recent short.log events (payloads masked by default for terminal privacy)
 memory-hook inspect --tail 10
+
+# Inspect recent events displaying full payload contents
+memory-hook inspect --tail 10 --show-payload
 
 # Print current long-term memory summary
 memory-hook inspect --long

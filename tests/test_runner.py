@@ -83,14 +83,15 @@ class TestRunner(unittest.TestCase):
         state = MemoryState(self.mem_dir)
         self.assertTrue(state.has_pending_compaction())
         self.assertEqual(state.pending_compaction["status"], "pending")
-        self.assertGreaterEqual(state.pending_compaction["requested_at_seq"], 1)
+        req_seq = state.pending_compaction["requested_at_seq"]
+        self.assertGreaterEqual(req_seq, 1)
         self.assertEqual(state.last_compacted_seq, 0)
         self.assertEqual(state.current_seq, 10)
 
-        # Now simulate agent/host acknowledging compaction
-        state.acknowledge_compaction(10)
+        # Now simulate agent/host acknowledging compaction at requested checkpoint
+        state.acknowledge_compaction(req_seq)
         self.assertFalse(state.has_pending_compaction())
-        self.assertEqual(state.last_compacted_seq, 10)
+        self.assertEqual(state.last_compacted_seq, req_seq)
         self.assertGreaterEqual(state.last_compacted_tokens, 10000)
 
     def test_legacy_txt_migration_to_log(self):
@@ -140,6 +141,7 @@ class TestRunner(unittest.TestCase):
         short_log.write_text("".join(lines), encoding="utf-8")
         state.data["short_log_tokens"] = 150000
         state.data["current_seq"] = 15
+        state.data["last_compacted_seq"] = 15  # All events are compacted history
         state.save()
 
         # Prune with 100k token limit

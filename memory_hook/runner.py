@@ -70,7 +70,7 @@ def migrate_legacy_txt_files(memory_dir: Path) -> None:
 
 
 def append_to_short_log(memory_dir: Path, event: Dict[str, Any]) -> None:
-    """Safely appends a JSONL record to short.log."""
+    """Safely appends a JSONL record to short.log with explicit sync."""
     short_log_path = memory_dir / SHORT_LOG_NAME
     line = json.dumps(event, ensure_ascii=False) + "\n"
     with open(short_log_path, "a", encoding="utf-8", errors="replace") as f:
@@ -87,7 +87,7 @@ def prune_short_log(
     state: MemoryState,
     max_tokens: int = MAX_SHORT_LOG_TOKENS,
 ) -> None:
-    """Maintains a rolling context window of max_tokens in short.log, protecting uncompacted events."""
+    """Maintains a rolling context window of max_tokens in short.log, protecting all uncompacted events."""
     short_log_path = memory_dir / SHORT_LOG_NAME
     if not short_log_path.is_file():
         return
@@ -113,11 +113,7 @@ def prune_short_log(
     kept_lines = []
     current_tokens = 0
     window_start_seq = state.current_seq
-    # Determine safe preservation boundary: retain events required by an active pending compaction
-    pending_cutoff_seq = None
-    if state.has_pending_compaction():
-        pc = state.pending_compaction or {}
-        pending_cutoff_seq = pc.get("requested_at_seq")
+    last_compacted_seq = state.last_compacted_seq
 
     for line in reversed(lines):
         line_clean = line.strip()
@@ -131,11 +127,12 @@ def prune_short_log(
         except Exception:
             line_tokens = max(1, len(line_clean) // 4)
 
-        # Only prune if we exceed max_tokens.
-        # If there is a pending compaction, protect events up to pending_cutoff_seq
-        if current_tokens + line_tokens > max_tokens and kept_lines:
-            if pending_cutoff_seq is None or (rec_seq is not None and rec_seq > pending_cutoff_seq):
-                break
+        # Uncompacted events (rec_seq > last_compacted_seq) MUST NEVER be pruned!
+        is_uncompacted = (rec_seq is not None and rec_seq > last_compacted_seq)
+
+        # Only prune compacted history when total tokens exceed the rolling window
+        if not is_uncompacted and current_tokens + line_tokens > max_tokens and kept_lines:
+            break
 
         if rec_seq is not None:
             window_start_seq = rec_seq
@@ -156,6 +153,11 @@ def prune_short_log(
                 temp_file = Path(f.name)
                 for l in kept_lines:
                     f.write(l if l.endswith("\n") else l + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
             temp_file.replace(short_log_path)
         finally:
             if temp_file and temp_file.exists():
@@ -212,6 +214,8 @@ def run_hook(
     with FileLock(lock_file, timeout=5.0):
         # Sequence numbering and state tracking
         state = MemoryState(memory_dir)
+        # Ensure state and short.log journal are strictly aligned (crash recovery)
+        state.reconcile_with_journal()
 
         # Check if long.log was updated and sync acknowledgement
         long_log_path = memory_dir / LONG_LOG_NAME
@@ -220,10 +224,12 @@ def run_hook(
         seq = state.next_seq(provider=provider)
         event["seq"] = seq
         event_tokens = int(event.get("tokens", 1))
-        state.add_tokens(event_tokens)
 
-        # Write to short.log and maintain rolling context window
+        # Write-ahead: Append to short.log first
         append_to_short_log(memory_dir, event)
+
+        # Update token accounting and apply rolling context prune
+        state.add_tokens(event_tokens)
         prune_short_log(memory_dir, state)
 
         # Check compaction condition (10k tokens)
@@ -296,7 +302,6 @@ def main() -> None:
         parser.add_argument("--root", type=str, help="Project root directory path")
         args = parser.parse_args()
 
-        # Read stdin safely
         raw_input_data = ""
         try:
             if not sys.stdin.isatty():
@@ -311,12 +316,10 @@ def main() -> None:
             raw_input_data=raw_input_data,
             project_root=root_path,
         )
-        # Output clean JSON on stdout for host agent
         sys.stdout.write(json.dumps(result))
         sys.stdout.flush()
         sys.exit(0)
     except Exception as exc:
-        # Never crash host agent loop - log to stderr and exit 0
         sys.stderr.write(f"memory-hook runner warning: {exc}\n")
         sys.stderr.flush()
         sys.stdout.write(json.dumps({"status": "ok", "decision": "allow"}))

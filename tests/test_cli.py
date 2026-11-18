@@ -112,6 +112,7 @@ class TestCLI(unittest.TestCase):
         event = {"seq": 1, "ts": "2026-11-18T00:00:00Z", "provider": "test", "type": "user_request", "payload": "hello"}
         short_log.write_text(json.dumps(event) + "\n", encoding="utf-8")
 
+        # 1. Default inspect should mask payload
         captured_out = io.StringIO()
         with patch.object(sys, "argv", ["memory-hook", "inspect", "--path", str(self.target_path)]):
             with patch("sys.stdout", captured_out):
@@ -119,7 +120,17 @@ class TestCLI(unittest.TestCase):
 
         output = captured_out.getvalue()
         self.assertIn("Showing last", output)
-        self.assertIn("hello", output)
+        self.assertIn("payload masked, pass --show-payload to view", output)
+        self.assertNotIn("hello", output)
+
+        # 2. Inspect with --show-payload should display full payload
+        captured_out2 = io.StringIO()
+        with patch.object(sys, "argv", ["memory-hook", "inspect", "--path", str(self.target_path), "--show-payload"]):
+            with patch("sys.stdout", captured_out2):
+                main()
+
+        output2 = captured_out2.getvalue()
+        self.assertIn("hello", output2)
 
     def test_inspect_long(self):
         """Tests 'inspect --long' displays long.log content."""

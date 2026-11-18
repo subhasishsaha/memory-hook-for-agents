@@ -166,6 +166,51 @@ class MemoryState:
         except Exception:
             return False
 
+    def reconcile_with_journal(self) -> bool:
+        """Reconciles sequence number and state with short.log journal.
+
+        Treats short.log as the append-only source of truth. If a crash or mismatch
+        occurred between sequence allocation and state persistence, aligns current_seq
+        with the last committed journal entry.
+        """
+        if not self.short_log_file.is_file():
+            return False
+
+        try:
+            last_line = ""
+            with open(self.short_log_file, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if line.strip():
+                        last_line = line.strip()
+            if not last_line:
+                return False
+
+            record = json.loads(last_line)
+            if not isinstance(record, dict):
+                return False
+
+            journal_seq = record.get("seq")
+            changed = False
+            if isinstance(journal_seq, int):
+                if journal_seq != self.current_seq:
+                    self.data["current_seq"] = journal_seq
+                    self.data["total_events"] = max(int(self.data.get("total_events", 0)), journal_seq)
+                    changed = True
+
+            if record.get("ts") and not self.data.get("last_updated_ts"):
+                self.data["last_updated_ts"] = str(record["ts"])
+                changed = True
+
+            if record.get("provider") and not self.data.get("last_updated_provider"):
+                self.data["last_updated_provider"] = str(record["provider"])
+                changed = True
+
+            if changed:
+                self.save()
+            return changed
+        except Exception:
+            return False
+
     def save(self) -> None:
         """Atomically saves state to disk."""
         self.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -179,13 +224,12 @@ class MemoryState:
             ) as f:
                 temp_file = Path(f.name)
                 json.dump(self.data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
             temp_file.replace(self.state_file)
-        except Exception:
-            try:
-                with open(self.state_file, "w", encoding="utf-8") as f:
-                    json.dump(self.data, f, indent=2, ensure_ascii=False)
-            except Exception:
-                pass
         finally:
             if temp_file and temp_file.exists():
                 try:
@@ -258,21 +302,32 @@ class MemoryState:
         self.save()
         return pending_record
 
-    def acknowledge_compaction(self, seq: Optional[int] = None) -> bool:
+    def acknowledge_compaction(self, seq: Optional[int] = None, force: bool = False) -> bool:
         """Idempotently acknowledges long-term compaction, advancing checkpoint."""
         pc = self.pending_compaction
-        target_seq = seq
-        if target_seq is None:
-            if pc and isinstance(pc, dict) and pc.get("requested_at_seq"):
+        has_pending = bool(pc and isinstance(pc, dict) and pc.get("status") == "pending")
+
+        if seq is None:
+            if has_pending and pc.get("requested_at_seq"):
                 target_seq = int(pc["requested_at_seq"])
             else:
                 target_seq = self.current_seq
+        else:
+            target_seq = int(seq)
 
-        # Validation: cannot acknowledge sequences beyond current, requested, or already-compacted sequence
+        # Validation 1: cannot acknowledge beyond pending checkpoint without force=True
+        if has_pending and not force:
+            requested_seq = int(pc.get("requested_at_seq", 0))
+            if target_seq > requested_seq:
+                raise ValueError(
+                    f"Cannot acknowledge sequence #{target_seq} beyond pending compaction checkpoint #{requested_seq}. Pass force=True to override."
+                )
+
+        # Validation 2: cannot acknowledge sequences beyond current or known sequences
         max_valid_seq = max(
             self.current_seq,
             self.last_compacted_seq,
-            int(pc.get("requested_at_seq", 0)) if (pc and isinstance(pc, dict)) else 0,
+            int(pc.get("requested_at_seq", 0)) if has_pending else 0,
         )
         if target_seq > max_valid_seq:
             raise ValueError(
@@ -280,7 +335,7 @@ class MemoryState:
             )
 
         # If already at or beyond target_seq and no compaction is pending, no-op
-        if target_seq <= self.last_compacted_seq and not self.has_pending_compaction():
+        if target_seq <= self.last_compacted_seq and not has_pending:
             return False
 
         if target_seq < self.last_compacted_seq:
@@ -295,9 +350,9 @@ class MemoryState:
         self.save()
         return True
 
-    def mark_compacted(self, seq: Optional[int] = None) -> None:
+    def mark_compacted(self, seq: Optional[int] = None, force: bool = False) -> None:
         """Compatibility wrapper that directly acknowledges compaction."""
-        self.acknowledge_compaction(seq)
+        self.acknowledge_compaction(seq, force=force)
 
     def check_long_log_sync(self, long_log_path: Path) -> bool:
         """Inspects long.log to verify if pending compaction was completed by an agent.

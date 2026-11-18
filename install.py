@@ -31,18 +31,6 @@ except ImportError:
         except ImportError:
             pass
 
-if install_hooks is None:
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet", "memory-hook"],
-            capture_output=True,
-            check=False,
-        )
-        from memory_hook.installer import install_hooks
-        from memory_hook.standalone_template import STANDALONE_RUNNER_CODE
-    except Exception:
-        pass
-
 
 def _standalone_install(
     target_dir: Path,

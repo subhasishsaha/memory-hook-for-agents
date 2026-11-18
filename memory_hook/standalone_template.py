@@ -170,16 +170,32 @@ def save_state(mem_dir, state):
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(mem_dir), delete=False) as f:
             tf = Path(f.name)
             json.dump(state, f, indent=2, ensure_ascii=False)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
         tf.replace(sf)
-    except Exception:
-        try:
-            with open(sf, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, ensure_ascii=False)
-        except Exception: pass
     finally:
         if tf and tf.exists():
             try: tf.unlink()
             except Exception: pass
+
+def reconcile_with_journal(mem_dir, state):
+    sl = mem_dir / SHORT_LOG_NAME
+    if not sl.is_file(): return
+    try:
+        last_line = ""
+        with open(sl, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.strip(): last_line = line.strip()
+        if last_line:
+            rec = json.loads(last_line)
+            j_seq = rec.get("seq")
+            if isinstance(j_seq, int) and j_seq != state.get("current_seq", 0):
+                state["current_seq"] = j_seq
+                state["total_events"] = max(state.get("total_events", 0), j_seq)
+    except Exception: pass
 
 def check_long_log_sync(mem_dir, state):
     pc = state.get("pending_compaction")
@@ -238,8 +254,7 @@ def prune_short_log(mem_dir, state):
     kept = []
     tokens = 0
     start_seq = state.get("current_seq", 0)
-    pc = state.get("pending_compaction")
-    pending_seq = pc.get("requested_at_seq") if pc else None
+    last_compacted = state.get("last_compacted_seq", 0)
 
     for line in reversed(lines):
         line_clean = line.strip()
@@ -252,9 +267,9 @@ def prune_short_log(mem_dir, state):
         except Exception:
             lt = max(1, len(line_clean) // 4)
 
-        if tokens + lt > MAX_SHORT_LOG_TOKENS and kept:
-            if pending_seq is None or (rec_seq is not None and rec_seq > pending_seq):
-                break
+        is_uncompacted = (rec_seq is not None and rec_seq > last_compacted)
+        if not is_uncompacted and tokens + lt > MAX_SHORT_LOG_TOKENS and kept:
+            break
         if rec_seq is not None:
             start_seq = rec_seq
         kept.append(line)
@@ -268,6 +283,9 @@ def prune_short_log(mem_dir, state):
                 tf = Path(f.name)
                 for l in kept:
                     f.write(l if l.endswith("\n") else l + "\n")
+                f.flush()
+                try: os.fsync(f.fileno())
+                except Exception: pass
             tf.replace(sl)
         finally:
             if tf and tf.exists():
@@ -307,6 +325,7 @@ def main():
         resp = {}
         with StandaloneLock(mem_dir / ".lock", timeout=5.0):
             state = load_state(mem_dir)
+            reconcile_with_journal(mem_dir, state)
             check_long_log_sync(mem_dir, state)
 
             seq = state.get("current_seq", 0) + 1
@@ -347,8 +366,6 @@ def main():
             payload = redact_val(payload)
             payload, is_trunc = truncate_string(payload)
             event_tokens = max(1, estimate_tokens(payload))
-            state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + event_tokens
-            state["short_log_tokens"] = state.get("short_log_tokens", 0) + event_tokens
 
             record = {
                 "seq": seq,
@@ -362,8 +379,16 @@ def main():
                 "truncated": is_trunc
             }
 
+            # Write-ahead: append to journal first
             with open(mem_dir / SHORT_LOG_NAME, "a", encoding="utf-8", errors="replace") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                f.flush()
+                try: os.fsync(f.fileno())
+                except Exception: pass
+
+            # Update token accounting and prune rolling context
+            state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + event_tokens
+            state["short_log_tokens"] = state.get("short_log_tokens", 0) + event_tokens
             prune_short_log(mem_dir, state)
 
             uncompacted = state["total_lifetime_tokens"] - state.get("last_compacted_tokens", 0)
