@@ -465,6 +465,11 @@ def append_or_create_instructions(
                 f.write(separator + append_protocol.strip() + "\n")
 
 
+def quote_if_needed(path_str: str) -> str:
+    """Wraps path in double quotes only if it contains whitespace."""
+    return f'"{path_str}"' if " " in path_str else path_str
+
+
 def install_antigravity(project_root: Path) -> List[Path]:
     """Configures Antigravity .agents/hooks.json and AGENTS.md."""
     agents_dir = project_root / ".agents"
@@ -473,6 +478,8 @@ def install_antigravity(project_root: Path) -> List[Path]:
 
     root_abs = project_root.resolve().as_posix()
     runner_abs = (project_root / ".memory" / "bin" / RUNNER_SCRIPT_NAME).resolve().as_posix()
+    r_arg = quote_if_needed(runner_abs)
+    rt_arg = quote_if_needed(root_abs)
 
     existing_hooks: Dict[str, Any] = {}
     if hooks_file.is_file():
@@ -486,7 +493,7 @@ def install_antigravity(project_root: Path) -> List[Path]:
         "PreInvocation": [
             {
                 "type": "command",
-                "command": f'python "{runner_abs}" --provider antigravity --event PreInvocation --root "{root_abs}"'
+                "command": f'python {r_arg} --provider antigravity --event PreInvocation --root {rt_arg}'
             }
         ],
         "PreToolUse": [
@@ -495,7 +502,7 @@ def install_antigravity(project_root: Path) -> List[Path]:
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f'python "{runner_abs}" --provider antigravity --event PreToolUse --root "{root_abs}"'
+                        "command": f'python {r_arg} --provider antigravity --event PreToolUse --root {rt_arg}'
                     }
                 ]
             }
@@ -506,7 +513,7 @@ def install_antigravity(project_root: Path) -> List[Path]:
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f'python "{runner_abs}" --provider antigravity --event PostToolUse --root "{root_abs}"'
+                        "command": f'python {r_arg} --provider antigravity --event PostToolUse --root {rt_arg}'
                     }
                 ]
             }
@@ -514,7 +521,7 @@ def install_antigravity(project_root: Path) -> List[Path]:
         "Stop": [
             {
                 "type": "command",
-                "command": f'python "{runner_abs}" --provider antigravity --event Stop --root "{root_abs}"'
+                "command": f'python {r_arg} --provider antigravity --event Stop --root {rt_arg}'
             }
         ]
     }

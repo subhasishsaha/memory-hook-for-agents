@@ -492,8 +492,13 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
                 separator = "\n\n---\n\n" if existing.strip() else ""
                 file_path.write_text(existing.rstrip() + separator + append_protocol.strip() + "\n", encoding="utf-8")
 
+    def quote_if_needed(path_str: str) -> str:
+        return f'"{path_str}"' if " " in path_str else path_str
+
     root_abs = target_dir.resolve().as_posix()
     runner_abs = (target_dir / ".memory" / "bin" / "memory_hook_runner.pyc").resolve().as_posix()
+    r_arg = quote_if_needed(runner_abs)
+    rt_arg = quote_if_needed(root_abs)
 
     # Antigravity
     agents_dir = target_dir / ".agents"
@@ -506,10 +511,10 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
         except Exception:
             existing_agents_hooks = {}
     existing_agents_hooks["memory-hook"] = {
-        "PreInvocation": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PreInvocation --root "{root_abs}"'}],
-        "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PreToolUse --root "{root_abs}"'}]}],
-        "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PostToolUse --root "{root_abs}"'}]}],
-        "Stop": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event Stop --root "{root_abs}"'}]
+        "PreInvocation": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PreInvocation --root {rt_arg}'}],
+        "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PreToolUse --root {rt_arg}'}]}],
+        "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PostToolUse --root {rt_arg}'}]}],
+        "Stop": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event Stop --root {rt_arg}'}]
     }
     agents_hooks.write_text(json.dumps(existing_agents_hooks, indent=2), encoding="utf-8")
     append_or_create_instructions(target_dir / "AGENTS.md", f"# Antigravity Agent Guidelines\n\n{proto_instructions}", proto_instructions)
