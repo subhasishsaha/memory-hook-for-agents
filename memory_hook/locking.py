@@ -32,6 +32,35 @@ def safe_fsync(fd: int) -> None:
         raise
 
 
+def safe_fsync_dir(dir_path: Path) -> None:
+    """Durably flushes parent directory descriptor to disk on POSIX systems.
+
+    On Windows, directory descriptors do not support fsync, so this is a no-op.
+    On POSIX, opening the directory with O_RDONLY and calling fsync ensures atomic rename/replace
+    directory-entry updates are durably committed to media.
+    """
+    if sys.platform == "win32":
+        return
+    try:
+        dir_fd = os.open(str(dir_path), os.O_RDONLY)
+        try:
+            safe_fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as e:
+        import errno
+        unsupported_codes = {
+            getattr(errno, "EINVAL", 22),
+            getattr(errno, "ENOTSUP", 45),
+            getattr(errno, "EOPNOTSUPP", 45),
+            getattr(errno, "EPERM", 1),
+            getattr(errno, "EACCES", 13),
+        }
+        if e.errno in unsupported_codes:
+            return
+        raise
+
+
 class FileLock:
     """A cross-platform, reentrant-safe file lock supporting Windows and Unix.
     

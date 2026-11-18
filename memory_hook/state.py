@@ -16,7 +16,7 @@ from .constants import (
     SHORT_LOG_NAME,
     STATE_FILE_NAME,
 )
-from .locking import safe_fsync
+from .locking import safe_fsync, safe_fsync_dir
 
 
 class MemoryState:
@@ -226,10 +226,10 @@ class MemoryState:
                 return True
             return False
 
+        last_line = ""
+        tokens_sum = 0
+        event_count = 0
         try:
-            last_line = ""
-            tokens_sum = 0
-            event_count = 0
             with open(self.short_log_file, "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
                     line_clean = line.strip()
@@ -244,46 +244,49 @@ class MemoryState:
                                     tokens_sum += tok
                         except Exception:
                             pass
+        except OSError:
+            return False
 
-            if not last_line:
-                if self.current_seq != 0:
-                    self.data["current_seq"] = 0
-                    self.save()
-                    return True
-                return False
-
-            record = json.loads(last_line)
-            if not isinstance(record, dict):
-                return False
-
-            journal_seq = record.get("seq")
-            changed = False
-            if isinstance(journal_seq, int):
-                if journal_seq != self.current_seq:
-                    self.data["current_seq"] = journal_seq
-                    self.data["total_events"] = max(event_count, journal_seq)
-                    changed = True
-
-            # If journal has more tokens than recorded in short_log_tokens (crash before state save)
-            if tokens_sum > self.short_log_tokens:
-                missing_tokens = tokens_sum - self.short_log_tokens
-                self.data["short_log_tokens"] = tokens_sum
-                self.data["total_lifetime_tokens"] = self.total_lifetime_tokens + missing_tokens
-                changed = True
-
-            if record.get("ts") and not self.data.get("last_updated_ts"):
-                self.data["last_updated_ts"] = str(record["ts"])
-                changed = True
-
-            if record.get("provider") and not self.data.get("last_updated_provider"):
-                self.data["last_updated_provider"] = str(record["provider"])
-                changed = True
-
-            if changed:
+        if not last_line:
+            if self.current_seq != 0:
+                self.data["current_seq"] = 0
                 self.save()
-            return changed
+                return True
+            return False
+
+        try:
+            record = json.loads(last_line)
         except Exception:
             return False
+        if not isinstance(record, dict):
+            return False
+
+        journal_seq = record.get("seq")
+        changed = False
+        if isinstance(journal_seq, int):
+            if journal_seq != self.current_seq:
+                self.data["current_seq"] = journal_seq
+                self.data["total_events"] = max(event_count, journal_seq)
+                changed = True
+
+        # If journal has more tokens than recorded in short_log_tokens (crash before state save)
+        if tokens_sum > self.short_log_tokens:
+            missing_tokens = tokens_sum - self.short_log_tokens
+            self.data["short_log_tokens"] = tokens_sum
+            self.data["total_lifetime_tokens"] = self.total_lifetime_tokens + missing_tokens
+            changed = True
+
+        if record.get("ts") and not self.data.get("last_updated_ts"):
+            self.data["last_updated_ts"] = str(record["ts"])
+            changed = True
+
+        if record.get("provider") and not self.data.get("last_updated_provider"):
+            self.data["last_updated_provider"] = str(record["provider"])
+            changed = True
+
+        if changed:
+            self.save()
+        return changed
 
     def save(self) -> None:
         """Atomically saves state to disk."""
@@ -301,6 +304,7 @@ class MemoryState:
                 f.flush()
                 safe_fsync(f.fileno())
             temp_file.replace(self.state_file)
+            safe_fsync_dir(self.memory_dir)
         finally:
             if temp_file and temp_file.exists():
                 try:
@@ -355,6 +359,10 @@ class MemoryState:
         """Creates a pending compaction request if none is already pending."""
         if seq is None:
             seq = self.current_seq
+        elif seq > self.current_seq:
+            raise ValueError(
+                f"Cannot request compaction for sequence #{seq} ahead of current journal sequence #{self.current_seq}"
+            )
         if uncompacted_tokens is None:
             uncompacted_tokens = self.uncompacted_tokens
 
@@ -404,12 +412,9 @@ class MemoryState:
                     f"Action Required: Complete synthesis through #{requested_seq} or pass force=True."
                 )
 
-        # Validation 3: cannot acknowledge sequences beyond current or known sequences
-        max_valid_seq = max(
-            self.current_seq,
-            self.last_compacted_seq,
-            int(pc.get("requested_at_seq", 0)) if has_pending else 0,
-        )
+        # Validation 3: cannot acknowledge sequences beyond current journal sequence
+        # (pending checkpoint must NEVER validate itself ahead of current_seq)
+        max_valid_seq = self.current_seq
         if target_seq > max_valid_seq:
             raise ValueError(
                 f"Cannot acknowledge sequence #{target_seq} ahead of current sequence #{max_valid_seq}"
@@ -450,6 +455,7 @@ class MemoryState:
         if not long_log_path.is_file():
             return False
 
+        synced_seq = None
         try:
             stat = long_log_path.stat()
             if stat.st_size == 0:
@@ -459,17 +465,24 @@ class MemoryState:
                 content = f.read(4096)
 
             match = re.search(r"Synced Through Event:\s*#(\d+)", content)
-            pc = self.pending_compaction or {}
-            requested_seq = int(pc.get("requested_at_seq", 0))
-
             if match:
                 synced_seq = int(match.group(1))
-                max_valid = max(self.current_seq, requested_seq)
-                if requested_seq <= synced_seq <= max_valid:
-                    self.acknowledge_compaction(synced_seq, force=True)
-                    return True
-        except Exception:
-            pass
+        except (OSError, UnicodeError, ValueError):
+            return False
+
+        if synced_seq is None:
+            return False
+
+        pc = self.pending_compaction or {}
+        requested_seq = int(pc.get("requested_at_seq", 0))
+
+        # Check bounds:
+        # 1. Target must be <= self.current_seq (pending checkpoint cannot validate itself)
+        # 2. Cannot acknowledge sequences below requested_seq
+        # 3. If requested_seq > self.current_seq, pending state is inconsistent; reject and preserve
+        if requested_seq <= synced_seq <= self.current_seq:
+            self.acknowledge_compaction(synced_seq, force=True)
+            return True
 
         return False
 

@@ -24,7 +24,7 @@ from .constants import (
     PROVIDER_CURSOR,
     SHORT_LOG_NAME,
 )
-from .locking import FileLock, safe_fsync
+from .locking import FileLock, safe_fsync, safe_fsync_dir
 from .normalizer import detect_provider, normalize_event
 from .state import MemoryState
 
@@ -153,6 +153,7 @@ def prune_short_log(
                 f.flush()
                 safe_fsync(f.fileno())
             temp_file.replace(short_log_path)
+            safe_fsync_dir(memory_dir)
         finally:
             if temp_file and temp_file.exists():
                 try:

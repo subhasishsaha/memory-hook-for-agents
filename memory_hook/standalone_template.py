@@ -142,6 +142,28 @@ def safe_fsync(fd):
             return
         raise
 
+def safe_fsync_dir(dir_path):
+    if sys.platform == "win32":
+        return
+    try:
+        dir_fd = os.open(str(dir_path), os.O_RDONLY)
+        try:
+            safe_fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as e:
+        import errno
+        unsupported = {
+            getattr(errno, "EINVAL", 22),
+            getattr(errno, "ENOTSUP", 45),
+            getattr(errno, "EOPNOTSUPP", 45),
+            getattr(errno, "EPERM", 1),
+            getattr(errno, "EACCES", 13),
+        }
+        if e.errno in unsupported:
+            return
+        raise
+
 def estimate_tokens(val):
     if val is None: return 0
     if isinstance(val, (int, float, bool)): return 1
@@ -269,6 +291,7 @@ def save_state(mem_dir, state):
             f.flush()
             safe_fsync(f.fileno())
         tf.replace(sf)
+        safe_fsync_dir(mem_dir)
     finally:
         if tf and tf.exists():
             try: tf.unlink()
@@ -315,10 +338,10 @@ def reconcile_with_journal(mem_dir, state):
             save_state(mem_dir, state)
             return True
         return False
+    last_line = ""
+    tokens_sum = 0
+    event_count = 0
     try:
-        last_line = ""
-        tokens_sum = 0
-        event_count = 0
         with open(sl, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line_clean = line.strip()
@@ -331,39 +354,42 @@ def reconcile_with_journal(mem_dir, state):
                             tok = rec.get("tokens", 0)
                             if isinstance(tok, int):
                                 tokens_sum += tok
-                    except Exception:
-                        pass
-        if not last_line:
-            if state.get("current_seq", 0) != 0:
-                state["current_seq"] = 0
-                save_state(mem_dir, state)
-                return True
-            return False
-        record = json.loads(last_line)
-        if not isinstance(record, dict):
-            return False
-        journal_seq = record.get("seq")
-        changed = False
-        if isinstance(journal_seq, int) and journal_seq != state.get("current_seq", 0):
-            state["current_seq"] = journal_seq
-            state["total_events"] = max(event_count, journal_seq)
-            changed = True
-        if tokens_sum > state.get("short_log_tokens", 0):
-            missing = tokens_sum - state.get("short_log_tokens", 0)
-            state["short_log_tokens"] = tokens_sum
-            state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + missing
-            changed = True
-        if record.get("ts") and not state.get("last_updated_ts"):
-            state["last_updated_ts"] = str(record["ts"])
-            changed = True
-        if record.get("provider") and not state.get("last_updated_provider"):
-            state["last_updated_provider"] = str(record["provider"])
-            changed = True
-        if changed:
+                    except Exception: pass
+    except OSError:
+        return False
+
+    if not last_line:
+        if state.get("current_seq", 0) != 0:
+            state["current_seq"] = 0
             save_state(mem_dir, state)
-        return changed
+            return True
+        return False
+    try:
+        record = json.loads(last_line)
     except Exception:
         return False
+    if not isinstance(record, dict):
+        return False
+    journal_seq = record.get("seq")
+    changed = False
+    if isinstance(journal_seq, int) and journal_seq != state.get("current_seq", 0):
+        state["current_seq"] = journal_seq
+        state["total_events"] = max(event_count, journal_seq)
+        changed = True
+    if tokens_sum > state.get("short_log_tokens", 0):
+        missing = tokens_sum - state.get("short_log_tokens", 0)
+        state["short_log_tokens"] = tokens_sum
+        state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + missing
+        changed = True
+    if record.get("ts") and not state.get("last_updated_ts"):
+        state["last_updated_ts"] = str(record["ts"])
+        changed = True
+    if record.get("provider") and not state.get("last_updated_provider"):
+        state["last_updated_provider"] = str(record["provider"])
+        changed = True
+    if changed:
+        save_state(mem_dir, state)
+    return changed
 
 def check_long_log_sync(mem_dir, state):
     pc = state.get("pending_compaction")
@@ -372,23 +398,32 @@ def check_long_log_sync(mem_dir, state):
     ll_path = mem_dir / LONG_LOG_NAME
     if not ll_path.is_file():
         return False
+    synced_seq = None
     try:
         with open(ll_path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read(4096)
         match = re.search(r"Synced Through Event:\s*#(\d+)", content)
-        requested_seq = int(pc.get("requested_at_seq", 0))
         if match:
             synced_seq = int(match.group(1))
-            current_seq = state.get("current_seq", 0)
-            max_valid = max(current_seq, requested_seq)
-            if requested_seq <= synced_seq <= max_valid:
-                state["last_compacted_seq"] = synced_seq
-                state["last_compacted_tokens"] = tokens_at_seq(mem_dir, state, synced_seq)
-                state["pending_compaction"] = None
-                state["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
-                save_state(mem_dir, state)
-                return True
-    except Exception: pass
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+    if synced_seq is None:
+        return False
+
+    requested_seq = int(pc.get("requested_at_seq", 0))
+    current_seq = state.get("current_seq", 0)
+    # Check bounds:
+    # 1. Target must be <= current_seq (pending checkpoint cannot validate itself)
+    # 2. Cannot acknowledge sequences below requested_seq
+    # 3. If requested_seq > current_seq, pending state is inconsistent; reject and preserve
+    if requested_seq <= synced_seq <= current_seq:
+        state["last_compacted_seq"] = synced_seq
+        state["last_compacted_tokens"] = tokens_at_seq(mem_dir, state, synced_seq)
+        state["pending_compaction"] = None
+        state["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
+        save_state(mem_dir, state)
+        return True
     return False
 
 def truncate_string(val, max_len=MAX_PAYLOAD_STRING_LENGTH):

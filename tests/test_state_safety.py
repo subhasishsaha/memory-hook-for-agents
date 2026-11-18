@@ -327,6 +327,87 @@ class TestStateSafety(unittest.TestCase):
             # Should not raise
             safe_fsync(999)
 
+    def test_pending_checkpoint_cannot_validate_itself_beyond_current_sequence_package_and_standalone(self):
+        """A pending checkpoint ahead of current sequence (e.g. current=70, requested=80) cannot validate itself."""
+        from memory_hook.constants import LONG_LOG_NAME
+        from memory_hook.standalone_template import STANDALONE_RUNNER_CODE
+
+        # Inconsistent pending state: journal at 70, pending requested at 80
+        state = MemoryState(self.mem_dir)
+        records = [
+            {"seq": i, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 100}
+            for i in range(1, 71)
+        ]
+        self.short_log.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        state.data["current_seq"] = 70
+        state.data["total_events"] = 70
+        state.data["total_lifetime_tokens"] = 7000
+        state.data["short_log_tokens"] = 7000
+        state.data["pending_compaction"] = {
+            "status": "pending",
+            "requested_at_seq": 80,
+            "requested_tokens": 8000,
+            "lifetime_tokens_at_request": 8000,
+            "requested_at": "2026-11-18T00:00:00Z",
+        }
+        state.save()
+
+        # long.log claims marker #80
+        long_log_path = self.mem_dir / LONG_LOG_NAME
+        long_log_path.write_text(
+            "# Project Memory\n> Last Updated: 2026-11-18 | Synced Through Event: #80\n",
+            encoding="utf-8"
+        )
+
+        # 1. Package check_long_log_sync must reject and preserve pending compaction
+        pkg_synced = state.check_long_log_sync(long_log_path)
+        self.assertFalse(pkg_synced)
+        self.assertTrue(state.has_pending_compaction())
+        self.assertEqual(state.last_compacted_seq, 0)
+
+        # Direct acknowledgement of #80 must raise ValueError
+        with self.assertRaises(ValueError):
+            state.acknowledge_compaction(80, force=True)
+
+        # 2. Standalone runner must also reject and preserve pending compaction
+        runner_scope = {}
+        exec(STANDALONE_RUNNER_CODE, runner_scope)
+        std_check_sync = runner_scope["check_long_log_sync"]
+        std_load_state = runner_scope["load_state"]
+
+        std_state = std_load_state(self.mem_dir)
+        std_synced = std_check_sync(self.mem_dir, std_state)
+        self.assertFalse(std_synced)
+        self.assertIsNotNone(std_state.get("pending_compaction"))
+        self.assertEqual(std_state.get("last_compacted_seq", 0), 0)
+
+    def test_persistence_errors_propagate_from_sync_and_reconcile(self):
+        """Genuine filesystem/disk write errors during save propagate as OSError."""
+        import errno
+        from memory_hook.constants import LONG_LOG_NAME
+
+        state = MemoryState(self.mem_dir)
+        state.data["current_seq"] = 50
+        state.data["total_events"] = 50
+        state.request_compaction(seq=50, uncompacted_tokens=5000)
+        state.save()
+
+        long_log_path = self.mem_dir / LONG_LOG_NAME
+        long_log_path.write_text(
+            "# Project Memory\n> Last Updated: 2026-11-18 | Synced Through Event: #50\n",
+            encoding="utf-8"
+        )
+
+        # When save fails with EIO during long log sync, OSError must propagate
+        with patch.object(state, "save", side_effect=OSError(getattr(errno, "EIO", 5), "I/O error")):
+            with self.assertRaises(OSError):
+                state.check_long_log_sync(long_log_path)
+
+        # When save fails with EIO during journal reconciliation, OSError must propagate
+        with patch.object(state, "save", side_effect=OSError(getattr(errno, "EIO", 5), "I/O error")):
+            with self.assertRaises(OSError):
+                state.reconcile_with_journal()
+
 
 if __name__ == "__main__":
     unittest.main()

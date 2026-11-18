@@ -23,6 +23,8 @@ class TestCompactionAcknowledgement(unittest.TestCase):
 
     def test_pending_request_lifecycle(self):
         state = MemoryState(self.mem_dir)
+        state.data["current_seq"] = 20
+        state.save()
         self.assertFalse(state.has_pending_compaction())
         self.assertEqual(state.last_compacted_seq, 0)
 
@@ -57,6 +59,8 @@ class TestCompactionAcknowledgement(unittest.TestCase):
 
     def test_automatic_long_log_sync_detection(self):
         state = MemoryState(self.mem_dir)
+        state.data["current_seq"] = 50
+        state.save()
         state.request_compaction(seq=50, uncompacted_tokens=10500)
         long_log_path = self.mem_dir / LONG_LOG_NAME
 
