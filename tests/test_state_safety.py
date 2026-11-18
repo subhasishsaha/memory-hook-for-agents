@@ -252,6 +252,81 @@ class TestStateSafety(unittest.TestCase):
         self.assertEqual(state.last_compacted_seq, 100)
         self.assertFalse(state.has_pending_compaction())
 
+    def test_check_long_log_sync_rejects_marker_ahead_of_current_sequence_package_and_standalone(self):
+        """Both package and standalone runners reject sync markers claiming sequences ahead of current journal."""
+        from memory_hook.constants import LONG_LOG_NAME
+        from memory_hook.standalone_template import STANDALONE_RUNNER_CODE
+
+        # Set up state with current_seq = 100, pending request = 80
+        state = MemoryState(self.mem_dir)
+        records = [
+            {"seq": i, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 100}
+            for i in range(1, 101)
+        ]
+        self.short_log.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        state.data["current_seq"] = 100
+        state.data["total_events"] = 100
+        state.data["total_lifetime_tokens"] = 10000
+        state.data["short_log_tokens"] = 10000
+        state.request_compaction(seq=80, uncompacted_tokens=8000)
+        state.save()
+
+        # long.log claims future sequence #101
+        long_log_path = self.mem_dir / LONG_LOG_NAME
+        long_log_path.write_text(
+            "# Project Memory\n> Last Updated: 2026-11-18 | Synced Through Event: #101\n",
+            encoding="utf-8"
+        )
+
+        # 1. Package check_long_log_sync must reject future marker
+        pkg_synced = state.check_long_log_sync(long_log_path)
+        self.assertFalse(pkg_synced)
+        self.assertTrue(state.has_pending_compaction())
+        self.assertEqual(state.last_compacted_seq, 0)
+
+        # 2. Standalone runner must also reject future marker
+        runner_scope = {}
+        exec(STANDALONE_RUNNER_CODE, runner_scope)
+        std_check_sync = runner_scope["check_long_log_sync"]
+        std_load_state = runner_scope["load_state"]
+
+        std_state = std_load_state(self.mem_dir)
+        std_synced = std_check_sync(self.mem_dir, std_state)
+        self.assertFalse(std_synced)
+        self.assertIsNotNone(std_state.get("pending_compaction"))
+        self.assertEqual(std_state.get("last_compacted_seq", 0), 0)
+
+    def test_recovery_metadata_preserved_across_reloads(self):
+        """Recovery metadata fields (retained_events, lifetime_tokens_exact, recovered_at_ts) persist on reload."""
+        state = MemoryState(self.mem_dir)
+        state.data["current_seq"] = 50
+        state.data["retained_events"] = 50
+        state.data["lifetime_tokens_exact"] = False
+        state.data["recovered_at_ts"] = "2026-11-18T10:00:00Z"
+        state.save()
+
+        # Reload from disk
+        reloaded = MemoryState(self.mem_dir)
+        self.assertEqual(reloaded.data.get("retained_events"), 50)
+        self.assertIs(reloaded.data.get("lifetime_tokens_exact"), False)
+        self.assertEqual(reloaded.data.get("recovered_at_ts"), "2026-11-18T10:00:00Z")
+
+    def test_safe_fsync_error_propagation_and_unsupported_errno(self):
+        """safe_fsync propagates fatal disk I/O errors and ignores only unsupported platform errnos."""
+        import errno
+        from memory_hook.locking import safe_fsync
+
+        # 1. Genuine fatal I/O failure must be raised
+        with patch("os.fsync", side_effect=OSError(getattr(errno, "EIO", 5), "Input/output error")):
+            with self.assertRaises(OSError) as ctx:
+                safe_fsync(999)
+            self.assertEqual(ctx.exception.errno, getattr(errno, "EIO", 5))
+
+        # 2. Unsupported device errno (e.g. EINVAL on raw devices / character streams) should be safely ignored
+        with patch("os.fsync", side_effect=OSError(getattr(errno, "EINVAL", 22), "Invalid argument")):
+            # Should not raise
+            safe_fsync(999)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,7 +24,7 @@ from .constants import (
     PROVIDER_CURSOR,
     SHORT_LOG_NAME,
 )
-from .locking import FileLock
+from .locking import FileLock, safe_fsync
 from .normalizer import detect_provider, normalize_event
 from .state import MemoryState
 
@@ -70,16 +70,13 @@ def migrate_legacy_txt_files(memory_dir: Path) -> None:
 
 
 def append_to_short_log(memory_dir: Path, event: Dict[str, Any]) -> None:
-    """Safely appends a JSONL record to short.log with explicit sync."""
+    """Safely appends a JSONL record to short.log with explicit durable sync."""
     short_log_path = memory_dir / SHORT_LOG_NAME
     line = json.dumps(event, ensure_ascii=False) + "\n"
     with open(short_log_path, "a", encoding="utf-8", errors="replace") as f:
         f.write(line)
         f.flush()
-        try:
-            os.fsync(f.fileno())
-        except Exception:
-            pass
+        safe_fsync(f.fileno())
 
 
 def prune_short_log(
@@ -154,10 +151,7 @@ def prune_short_log(
                 for l in kept_lines:
                     f.write(l if l.endswith("\n") else l + "\n")
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except Exception:
-                    pass
+                safe_fsync(f.fileno())
             temp_file.replace(short_log_path)
         finally:
             if temp_file and temp_file.exists():

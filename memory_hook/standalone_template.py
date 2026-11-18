@@ -128,6 +128,20 @@ class StandaloneLock:
                 except Exception: pass
                 self.f = None
 
+def safe_fsync(fd):
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        import errno
+        unsupported = {
+            getattr(errno, "EINVAL", 22),
+            getattr(errno, "ENOTSUP", 45),
+            getattr(errno, "EOPNOTSUPP", 45),
+        }
+        if e.errno in unsupported:
+            return
+        raise
+
 def estimate_tokens(val):
     if val is None: return 0
     if isinstance(val, (int, float, bool)): return 1
@@ -219,8 +233,11 @@ def load_state(mem_dir):
     sf = mem_dir / STATE_FILE_NAME
     default_state = {
         "version": 2, "current_seq": 0, "last_compacted_seq": 0,
+        "last_updated_ts": None, "last_updated_provider": None,
         "total_events": 0, "total_lifetime_tokens": 0, "last_compacted_tokens": 0,
-        "short_log_tokens": 0, "window_start_seq": 1, "pending_compaction": None
+        "short_log_tokens": 0, "window_start_seq": 1, "pending_compaction": None,
+        "runner_sha256": None, "retained_events": 0, "lifetime_tokens_exact": True,
+        "recovered_at_ts": None
     }
     if sf.is_file():
         is_corrupt = False
@@ -230,7 +247,7 @@ def load_state(mem_dir):
                 if not content:
                     is_corrupt = True
                 else:
-                    d = json.load(f)
+                    d = json.loads(content)
                     if isinstance(d, dict):
                         default_state.update(d)
                         return default_state
@@ -250,10 +267,7 @@ def save_state(mem_dir, state):
             tf = Path(f.name)
             json.dump(state, f, indent=2, ensure_ascii=False)
             f.flush()
-            try:
-                os.fsync(f.fileno())
-            except Exception:
-                pass
+            safe_fsync(f.fileno())
         tf.replace(sf)
     finally:
         if tf and tf.exists():
@@ -365,10 +379,11 @@ def check_long_log_sync(mem_dir, state):
         requested_seq = int(pc.get("requested_at_seq", 0))
         if match:
             synced_seq = int(match.group(1))
-            if synced_seq >= requested_seq:
-                target_seq = min(synced_seq, state.get("current_seq", 0))
-                state["last_compacted_seq"] = target_seq
-                state["last_compacted_tokens"] = tokens_at_seq(mem_dir, state, target_seq)
+            current_seq = state.get("current_seq", 0)
+            max_valid = max(current_seq, requested_seq)
+            if requested_seq <= synced_seq <= max_valid:
+                state["last_compacted_seq"] = synced_seq
+                state["last_compacted_tokens"] = tokens_at_seq(mem_dir, state, synced_seq)
                 state["pending_compaction"] = None
                 state["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
                 save_state(mem_dir, state)
@@ -441,8 +456,7 @@ def prune_short_log(mem_dir, state):
                 for l in kept:
                     f.write(l if l.endswith("\n") else l + "\n")
                 f.flush()
-                try: os.fsync(f.fileno())
-                except Exception: pass
+                safe_fsync(f.fileno())
             tf.replace(sl)
         finally:
             if tf and tf.exists():
@@ -540,8 +554,7 @@ def main():
             with open(mem_dir / SHORT_LOG_NAME, "a", encoding="utf-8", errors="replace") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 f.flush()
-                try: os.fsync(f.fileno())
-                except Exception: pass
+                safe_fsync(f.fileno())
 
             # Update token accounting and prune rolling context
             state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + event_tokens

@@ -12,6 +12,26 @@ class LockTimeoutError(Exception):
     pass
 
 
+def safe_fsync(fd: int) -> None:
+    """Durably flushes file descriptor to disk, propagating genuine I/O failures.
+
+    Ignores only platform-specific non-fatal errno codes where fsync is not supported
+    by the underlying device (e.g. character devices, pipes, or virtual filesystems).
+    """
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        import errno
+        unsupported_codes = {
+            getattr(errno, "EINVAL", 22),
+            getattr(errno, "ENOTSUP", 45),
+            getattr(errno, "EOPNOTSUPP", 45),
+        }
+        if e.errno in unsupported_codes:
+            return
+        raise
+
+
 class FileLock:
     """A cross-platform, reentrant-safe file lock supporting Windows and Unix.
     

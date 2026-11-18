@@ -16,6 +16,7 @@ from .constants import (
     SHORT_LOG_NAME,
     STATE_FILE_NAME,
 )
+from .locking import safe_fsync
 
 
 class MemoryState:
@@ -34,6 +35,9 @@ class MemoryState:
         "window_start_seq": 1,
         "pending_compaction": None,
         "runner_sha256": None,
+        "retained_events": 0,
+        "lifetime_tokens_exact": True,
+        "recovered_at_ts": None,
     }
 
     def __init__(self, memory_dir: Path):
@@ -81,6 +85,9 @@ class MemoryState:
                 self.data["pending_compaction"] = loaded.get("pending_compaction")
                 self.data["runner_sha256"] = loaded.get("runner_sha256")
                 self.data["version"] = int(loaded.get("version", 2))
+                self.data["retained_events"] = int(loaded["retained_events"]) if "retained_events" in loaded and loaded["retained_events"] is not None else None
+                self.data["lifetime_tokens_exact"] = bool(loaded["lifetime_tokens_exact"]) if "lifetime_tokens_exact" in loaded and loaded["lifetime_tokens_exact"] is not None else True
+                self.data["recovered_at_ts"] = loaded.get("recovered_at_ts")
             except (ValueError, TypeError):
                 self._handle_corrupt_state()
 
@@ -292,10 +299,7 @@ class MemoryState:
                 temp_file = Path(f.name)
                 json.dump(self.data, f, indent=2, ensure_ascii=False)
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except Exception:
-                    pass
+                safe_fsync(f.fileno())
             temp_file.replace(self.state_file)
         finally:
             if temp_file and temp_file.exists():
@@ -460,7 +464,8 @@ class MemoryState:
 
             if match:
                 synced_seq = int(match.group(1))
-                if synced_seq >= requested_seq:
+                max_valid = max(self.current_seq, requested_seq)
+                if requested_seq <= synced_seq <= max_valid:
                     self.acknowledge_compaction(synced_seq, force=True)
                     return True
         except Exception:
