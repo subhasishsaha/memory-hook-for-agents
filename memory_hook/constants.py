@@ -8,7 +8,9 @@ SHORT_LOG_NAME = "short.log"
 LONG_LOG_NAME = "long.log"
 STATE_FILE_NAME = "state.json"
 BIN_DIR_NAME = "bin"
-RUNNER_SCRIPT_NAME = "memory_hook_runner.py"
+RUNNER_SOURCE_NAME = "memory_hook_runner.py"
+RUNNER_COMPILED_NAME = "memory_hook_runner.pyc"
+RUNNER_SCRIPT_NAME = "memory_hook_runner.pyc"
 
 DEFAULT_COMPACT_INTERVAL = 10  # Legacy event-count fallback
 DEFAULT_COMPACT_TOKEN_INTERVAL = 10000  # Trigger long.log compaction notice every 10k tokens

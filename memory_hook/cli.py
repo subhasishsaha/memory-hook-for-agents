@@ -50,7 +50,7 @@ def cmd_install(args: argparse.Namespace) -> None:
     print(f"  • .memory/{SHORT_LOG_NAME} (Deterministic event log)")
     print(f"  • .memory/{LONG_LOG_NAME} (High-density distilled memory)")
     print(f"  • .memory/{STATE_FILE_NAME} (Event sequence and compaction state)")
-    print(f"  • .memory/bin/memory_hook_runner.py (Standalone portable runner)")
+    print(f"  • .memory/bin/memory_hook_runner.pyc (Compiled, locked runner)")
 
 
 def cmd_status(args: argparse.Namespace) -> None:

@@ -16,7 +16,9 @@ from .constants import (
     PROVIDER_CLAUDE,
     PROVIDER_CODEX,
     PROVIDER_CURSOR,
+    RUNNER_COMPILED_NAME,
     RUNNER_SCRIPT_NAME,
+    RUNNER_SOURCE_NAME,
     SHORT_LOG_NAME,
     STATE_FILE_NAME,
     SUPPORTED_PROVIDERS,
@@ -92,8 +94,16 @@ def initialize_memory_directory(project_root: Path) -> Path:
     state.save()
 
     # 4. Deploy self-contained portable runner script to .memory/bin/
+    # Clean up legacy uncompiled source if present
+    legacy_source = bin_dir / RUNNER_SOURCE_NAME
+    if legacy_source.is_file():
+        try:
+            legacy_source.unlink()
+        except Exception:
+            pass
+
     runner_target = bin_dir / RUNNER_SCRIPT_NAME
-    # We generate a standalone script that does not require pip packaging
+    # We generate and compile on the user system so only the compiled bytecode is stored
     generate_standalone_runner(runner_target)
 
     return memory_dir
@@ -397,11 +407,42 @@ def main():
 if __name__ == "__main__":
     main()
 '''
-    with open(target_path, "w", encoding="utf-8") as f:
+    bin_dir = target_path.parent
+    compiled_path = bin_dir / RUNNER_COMPILED_NAME
+    temp_source_path = bin_dir / RUNNER_SOURCE_NAME
+
+    # 1. Unset read-only attribute if already present from a previous install
+    if compiled_path.exists():
+        try:
+            if os.name == "nt":
+                import subprocess
+                subprocess.run(["attrib", "-R", str(compiled_path)], check=False, capture_output=True)
+            else:
+                compiled_path.chmod(0o755)
+        except Exception:
+            pass
+
+    # 2. Write source code temporarily
+    with open(temp_source_path, "w", encoding="utf-8") as f:
         f.write(runner_code)
+
+    # 3. Compile bytecode locally on the user's system
+    import py_compile
+    py_compile.compile(str(temp_source_path), cfile=str(compiled_path), doraise=True)
+
+    # 4. Remove uncompiled source code so only the compiled bytecode is stored
     try:
-        # Make executable on Unix/Mac
-        target_path.chmod(0o755)
+        temp_source_path.unlink()
+    except Exception:
+        pass
+
+    # 5. Lock compiled file with OS-level read-only permissions
+    try:
+        if os.name == "nt":
+            import subprocess
+            subprocess.run(["attrib", "+R", str(compiled_path)], check=False, capture_output=True)
+        else:
+            compiled_path.chmod(0o555)
     except Exception:
         pass
 

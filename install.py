@@ -417,7 +417,42 @@ def main():
 if __name__ == "__main__":
     main()
 '''
-    runner_script.write_text(runner_code, encoding="utf-8")
+    compiled_runner = bin_dir / "memory_hook_runner.pyc"
+    temp_source = bin_dir / "memory_hook_runner.py"
+
+    # 1. Unset read-only attribute if already present from previous install
+    if compiled_runner.exists():
+        try:
+            if os.name == "nt":
+                import subprocess
+                subprocess.run(["attrib", "-R", str(compiled_runner)], check=False, capture_output=True)
+            else:
+                compiled_runner.chmod(0o755)
+        except Exception:
+            pass
+
+    # 2. Write source code temporarily
+    temp_source.write_text(runner_code, encoding="utf-8")
+
+    # 3. Compile bytecode locally on the user's system
+    import py_compile
+    py_compile.compile(str(temp_source), cfile=str(compiled_runner), doraise=True)
+
+    # 4. Remove uncompiled source code so only the compiled bytecode is stored
+    try:
+        temp_source.unlink()
+    except Exception:
+        pass
+
+    # 5. Lock compiled file with OS-level read-only permissions
+    try:
+        if os.name == "nt":
+            import subprocess
+            subprocess.run(["attrib", "+R", str(compiled_runner)], check=False, capture_output=True)
+        else:
+            compiled_runner.chmod(0o555)
+    except Exception:
+        pass
 
     # 5. Instructions and Provider configs
     proto_instructions = """# Universal Memory Hook Protocol (.memory/)
@@ -441,6 +476,11 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
      - Update **Next Immediate Steps** with pending tasks.
      - Preserve and append any newly established **Architecture & Core Decisions**.
      - Keep content concise, high-density, and structured.
+
+3. **Security & Immutability Directives**:
+   - The runner at `.memory/bin/memory_hook_runner.pyc` is locally compiled bytecode locked with OS read-only permissions.
+   - Under NO circumstances should any agent attempt to edit, rewrite, replace, or delete files inside `.memory/bin/` or `.memory/state.json`.
+   - All memory updates must strictly be applied to `.memory/long.log`.
 """
 
     def append_or_create_instructions(file_path: Path, full_new_content: str, append_protocol: str) -> None:
@@ -453,7 +493,7 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
                 file_path.write_text(existing.rstrip() + separator + append_protocol.strip() + "\n", encoding="utf-8")
 
     root_abs = target_dir.resolve().as_posix()
-    runner_abs = (target_dir / ".memory" / "bin" / "memory_hook_runner.py").resolve().as_posix()
+    runner_abs = (target_dir / ".memory" / "bin" / "memory_hook_runner.pyc").resolve().as_posix()
 
     # Antigravity
     agents_dir = target_dir / ".agents"

@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,7 +25,8 @@ class TestInstaller(unittest.TestCase):
         self.assertTrue((mem_dir / SHORT_LOG_NAME).is_file())
         self.assertTrue((mem_dir / LONG_LOG_NAME).is_file())
         self.assertTrue((mem_dir / STATE_FILE_NAME).is_file())
-        self.assertTrue((mem_dir / "bin" / "memory_hook_runner.py").is_file())
+        self.assertTrue((mem_dir / "bin" / "memory_hook_runner.pyc").is_file())
+        self.assertFalse((mem_dir / "bin" / "memory_hook_runner.py").exists())
 
         # Check Antigravity files
         hooks_json = self.root / ".agents" / "hooks.json"
@@ -113,6 +115,31 @@ class TestInstaller(unittest.TestCase):
         self.assertIn("---", updated)
         self.assertIn("Universal Memory Hook Protocol (.memory/)", updated)
         self.assertEqual(updated.count("Universal Memory Hook Protocol"), 1)
+
+    def test_compiled_runner_and_read_only_protection(self):
+        install_hooks(self.root, providers=["antigravity"])
+        compiled = self.root / ".memory" / "bin" / "memory_hook_runner.pyc"
+        source = self.root / ".memory" / "bin" / "memory_hook_runner.py"
+
+        self.assertTrue(compiled.is_file())
+        self.assertFalse(source.exists())
+
+        # Verify executing compiled file works with python
+        import subprocess
+        proc = subprocess.run(
+            [sys.executable, str(compiled), "--event", "PreToolUse", "--provider", "antigravity", "--root", str(self.root)],
+            input="{}",
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("allow", proc.stdout)
+
+        # Verify read-only protection blocks modification
+        with self.assertRaises(PermissionError):
+            with open(compiled, "wb") as f:
+                f.write(b"tamper")
 
 
 if __name__ == "__main__":

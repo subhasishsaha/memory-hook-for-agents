@@ -51,6 +51,11 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
      - Update **Next Immediate Steps** with pending tasks.
      - Preserve and append any newly established **Architecture & Core Decisions**.
      - Keep content concise, high-density, and structured.
+
+3. **Security & Immutability Directives**:
+   - The runner at `.memory/bin/memory_hook_runner.pyc` is locally compiled bytecode locked with OS read-only permissions.
+   - Under NO circumstances should any agent attempt to edit, rewrite, replace, or delete files inside `.memory/bin/` or `.memory/state.json`.
+   - All memory updates must strictly be applied to `.memory/long.log`.
 """
 
 

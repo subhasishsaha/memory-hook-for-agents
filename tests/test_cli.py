@@ -39,7 +39,8 @@ class TestCLI(unittest.TestCase):
         self.assertTrue((mem_dir / SHORT_LOG_NAME).is_file())
         self.assertTrue((mem_dir / LONG_LOG_NAME).is_file())
         self.assertTrue((mem_dir / STATE_FILE_NAME).is_file())
-        self.assertTrue((mem_dir / "bin" / "memory_hook_runner.py").is_file())
+        self.assertTrue((mem_dir / "bin" / "memory_hook_runner.pyc").is_file())
+        self.assertFalse((mem_dir / "bin" / "memory_hook_runner.py").exists())
 
         # Verify all provider configs created
         self.assertTrue((self.target_path / ".agents" / "hooks.json").is_file())
