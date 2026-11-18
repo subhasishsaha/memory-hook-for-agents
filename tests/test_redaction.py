@@ -80,6 +80,44 @@ class TestSecretRedaction(unittest.TestCase):
         self.assertFalse(is_sensitive_path("README.md"))
         self.assertFalse(is_sensitive_path("src/app.py"))
 
+    def test_provider_specific_sensitive_payloads(self):
+        from memory_hook.normalizer import normalize_event
+
+        # 1. Claude Code PreToolUse reading .env
+        claude_raw = {
+            "sessionId": "claude-sess-1",
+            "tool_name": "read_file",
+            "tool_input": {
+                "path": "/workspace/.env",
+                "content": "OPENAI_API_KEY=sk-abcdef1234567890abcdef1234567890\nDB_PASS=secret123\n"
+            }
+        }
+        event_claude = normalize_event(claude_raw, event_hint="PreToolUse", provider_hint="claude-code")
+        self.assertEqual(event_claude["payload"]["args"]["content"], "[REDACTED:SENSITIVE_FILE_CONTENT]")
+
+        # 2. Antigravity PreToolUse with API key in arguments
+        antigravity_raw = {
+            "conversationId": "ag-conv-1",
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "CommandLine": "curl -H 'Authorization: Bearer abcdef1234567890abcdef1234567890' https://api.example.com"
+                }
+            }
+        }
+        event_ag = normalize_event(antigravity_raw, event_hint="PreToolUse", provider_hint="antigravity")
+        self.assertIn("Bearer [REDACTED:BEARER_TOKEN]", event_ag["payload"]["args"]["CommandLine"])
+        self.assertNotIn("abcdef1234567890abcdef1234567890", event_ag["payload"]["args"]["CommandLine"])
+
+        # 3. Codex / Cursor shell tool with password assignment
+        codex_raw = {
+            "name": "bash",
+            "args": {"command": "export DB_PASSWORD='mySuperSecretPassword123' && start"}
+        }
+        event_codex = normalize_event(codex_raw, event_hint="PreToolUse", provider_hint="codex")
+        self.assertIn("DB_PASSWORD=[REDACTED:SECRET]", event_codex["payload"]["args"]["command"])
+        self.assertNotIn("mySuperSecretPassword123", event_codex["payload"]["args"]["command"])
+
 
 if __name__ == "__main__":
     unittest.main()

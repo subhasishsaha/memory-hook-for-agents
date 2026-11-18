@@ -142,11 +142,22 @@ class MemoryState:
 
             self.data["current_seq"] = max_seq
             self.data["window_start_seq"] = min_seq if min_seq is not None else 1
-            self.data["total_events"] = max(self.data.get("total_events", 0), event_count)
             self.data["short_log_tokens"] = tokens_sum
-            self.data["total_lifetime_tokens"] = max(
-                self.data.get("total_lifetime_tokens", 0), tokens_sum
-            )
+
+            # If window starts at 1, short.log contains the complete project history
+            self.data["retained_events"] = event_count
+            self.data["total_events"] = max(self.data.get("total_events", 0), event_count)
+            if min_seq is not None and min_seq <= 1:
+                self.data["total_lifetime_tokens"] = tokens_sum
+                self.data["lifetime_tokens_exact"] = True
+            else:
+                # Log was pruned in the past; lifetime tokens for pruned events cannot be recovered from disk
+                self.data["total_lifetime_tokens"] = max(
+                    self.data.get("total_lifetime_tokens", 0), tokens_sum
+                )
+                self.data["lifetime_tokens_exact"] = False
+
+            self.data["recovered_at_ts"] = datetime.now(timezone.utc).isoformat()
             if last_ts:
                 self.data["last_updated_ts"] = last_ts
             if last_provider:
@@ -249,13 +260,24 @@ class MemoryState:
 
     def acknowledge_compaction(self, seq: Optional[int] = None) -> bool:
         """Idempotently acknowledges long-term compaction, advancing checkpoint."""
+        pc = self.pending_compaction
         target_seq = seq
         if target_seq is None:
-            pc = self.pending_compaction
             if pc and isinstance(pc, dict) and pc.get("requested_at_seq"):
                 target_seq = int(pc["requested_at_seq"])
             else:
                 target_seq = self.current_seq
+
+        # Validation: cannot acknowledge sequences beyond current, requested, or already-compacted sequence
+        max_valid_seq = max(
+            self.current_seq,
+            self.last_compacted_seq,
+            int(pc.get("requested_at_seq", 0)) if (pc and isinstance(pc, dict)) else 0,
+        )
+        if target_seq > max_valid_seq:
+            raise ValueError(
+                f"Cannot acknowledge sequence #{target_seq} ahead of current sequence #{max_valid_seq}"
+            )
 
         # If already at or beyond target_seq and no compaction is pending, no-op
         if target_seq <= self.last_compacted_seq and not self.has_pending_compaction():
@@ -278,7 +300,11 @@ class MemoryState:
         self.acknowledge_compaction(seq)
 
     def check_long_log_sync(self, long_log_path: Path) -> bool:
-        """Inspects long.log to verify if pending compaction was completed by an agent."""
+        """Inspects long.log to verify if pending compaction was completed by an agent.
+        
+        Strictly requires the explicit markdown header `Synced Through Event: #<seq>`.
+        Does not use flaky file modification time heuristics.
+        """
         if not self.has_pending_compaction():
             return False
 
@@ -301,15 +327,6 @@ class MemoryState:
                 synced_seq = int(match.group(1))
                 if synced_seq >= requested_seq:
                     self.acknowledge_compaction(synced_seq)
-                    return True
-
-            # Alternatively, check modification time against request timestamp
-            requested_at_str = pc.get("requested_at")
-            if requested_at_str:
-                req_dt = datetime.fromisoformat(requested_at_str)
-                mtime_dt = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-                if mtime_dt > req_dt and stat.st_size > 100:
-                    self.acknowledge_compaction(requested_seq)
                     return True
         except Exception:
             pass

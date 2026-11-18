@@ -143,11 +143,15 @@ def cmd_acknowledge(args: argparse.Namespace) -> None:
 
     state = MemoryState(memory_dir)
     target_seq = args.seq or state.current_seq
-    changed = state.acknowledge_compaction(target_seq)
-    if changed:
-        print(f"[SUCCESS] Compaction acknowledged through event #{state.last_compacted_seq}.")
-    else:
-        print(f"[NO-OP] State already acknowledged up to or beyond event #{target_seq}.")
+    try:
+        changed = state.acknowledge_compaction(target_seq)
+        if changed:
+            print(f"[SUCCESS] Compaction acknowledged through event #{state.last_compacted_seq}.")
+        else:
+            print(f"[NO-OP] State already acknowledged up to or beyond event #{target_seq}.")
+    except ValueError as e:
+        print(f"[ERROR] Invalid acknowledgement: {e}")
+        sys.exit(1)
 
 
 def cmd_inspect(args: argparse.Namespace) -> None:

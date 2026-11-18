@@ -48,7 +48,7 @@ REDACTION_PATTERNS = [
     # Generic key-value secret assignments in config/.env/json/cli
     (
         re.compile(
-            r"""(?i)\b(api[_-]?key|secret|password|passwd|auth[_-]?token|access[_-]?token)\s*[:=]\s*["']?([^\s"']{8,})["']?"""
+            r"""(?i)\b([a-zA-Z0-9_]*(?:api[_-]?key|secret|password|passwd|auth[_-]?token|access[_-]?token))\s*[:=]\s*["']?([^\s"']{8,})["']?"""
         ),
         r"\1=[REDACTED:SECRET]",
     ),
