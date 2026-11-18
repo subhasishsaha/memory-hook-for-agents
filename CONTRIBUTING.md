@@ -6,7 +6,7 @@ Thank you for your interest in contributing to `memory-hook`! We welcome contrib
 
 1. **Fork and Clone:**
    ```bash
-   git clone https://github.com/memory-hook/memory-hook.git
+   git clone https://github.com/subhasishsaha/memory-hook-for-agents.git
    cd memory-hook
    ```
 

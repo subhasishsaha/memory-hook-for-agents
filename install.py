@@ -4,12 +4,14 @@
 Can be run directly via `python install.py` or downloaded and piped into python.
 """
 
+import argparse
 import json
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 # Try importing from local package or existing environment
 install_hooks = None
@@ -39,7 +41,7 @@ if install_hooks is None:
         pass
 
 
-def _standalone_install(target_dir: Path) -> dict:
+def _standalone_install(target_dir: Path, providers: Optional[List[str]] = None) -> dict:
     """Self-contained fallback installer when memory-hook package is not importable."""
     memory_dir = target_dir / ".memory"
     bin_dir = memory_dir / "bin"
@@ -301,118 +303,133 @@ def save_state(mem_dir, data):
         pass
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--event", type=str, default="")
-    parser.add_argument("--provider", type=str, default="")
-    parser.add_argument("--root", type=str, default="")
-    args = parser.parse_args()
-
-    raw_in = ""
     try:
-        if not sys.stdin.isatty():
-            raw_in = sys.stdin.read()
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
-    raw_payload = {}
-    if raw_in:
+    try:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--event", type=str, default="")
+        parser.add_argument("--provider", type=str, default="")
+        parser.add_argument("--root", type=str, default="")
+        args = parser.parse_args()
+
+        raw_in = ""
         try:
-            raw_payload = json.loads(raw_in)
+            if not sys.stdin.isatty():
+                raw_in = sys.stdin.read()
         except Exception:
-            raw_payload = {"raw": raw_in}
+            pass
 
-    root = Path(args.root).resolve() if args.root else find_project_root()
-    mem_dir = root / MEMORY_DIR_NAME
-    mem_dir.mkdir(parents=True, exist_ok=True)
-    migrate_legacy_txt_files(mem_dir)
+        raw_payload = {}
+        if raw_in:
+            try:
+                raw_payload = json.loads(raw_in)
+            except Exception:
+                raw_payload = {"raw": raw_in}
 
-    state = load_state(mem_dir)
-    seq = state.get("current_seq", 0) + 1
-    state["current_seq"] = seq
-    state["total_events"] = state.get("total_events", 0) + 1
-    state["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
-    if args.provider:
-        state["last_updated_provider"] = args.provider
+        root = Path(args.root).resolve() if args.root else find_project_root()
+        mem_dir = root / MEMORY_DIR_NAME
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        migrate_legacy_txt_files(mem_dir)
 
-    # Determine event type
-    evt = args.event.lower()
-    event_type = "user_request"
-    payload = {}
-    is_trunc = False
+        state = load_state(mem_dir)
+        seq = state.get("current_seq", 0) + 1
+        state["current_seq"] = seq
+        state["total_events"] = state.get("total_events", 0) + 1
+        state["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
+        if args.provider:
+            state["last_updated_provider"] = args.provider
 
-    if "pretool" in evt:
-        event_type = "tool_call"
-        tc = raw_payload.get("toolCall") or raw_payload.get("tool_input") or {}
-        payload = {"tool": raw_payload.get("tool_name") or raw_payload.get("name") or "tool", "args": tc}
-    elif "posttool" in evt:
-        event_type = "tool_result"
-        payload = {
-            "status": "error" if raw_payload.get("error") else "success",
-            "output": raw_payload.get("tool_response") or raw_payload.get("result") or raw_payload.get("output") or "",
-            "error": raw_payload.get("error")
-        }
-    elif "stop" in evt or "response" in evt:
-        event_type = "model_response"
-        payload = {"content": extract_model_response(raw_payload)}
-    else:
+        # Determine event type
+        evt = args.event.lower()
         event_type = "user_request"
-        payload = {"content": raw_payload.get("lastUserInput") or raw_payload.get("prompt") or raw_payload.get("text") or raw_in}
+        payload = {}
+        is_trunc = False
 
-    payload, is_trunc = truncate_string(payload)
-    event_tokens = max(1, estimate_tokens(payload))
-    state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + event_tokens
-    state["short_log_tokens"] = state.get("short_log_tokens", 0) + event_tokens
+        if "pretool" in evt:
+            event_type = "tool_call"
+            tc = raw_payload.get("toolCall") or raw_payload.get("tool_input") or {}
+            payload = {"tool": raw_payload.get("tool_name") or raw_payload.get("name") or "tool", "args": tc}
+        elif "posttool" in evt:
+            event_type = "tool_result"
+            payload = {
+                "status": "error" if raw_payload.get("error") else "success",
+                "output": raw_payload.get("tool_response") or raw_payload.get("result") or raw_payload.get("output") or "",
+                "error": raw_payload.get("error")
+            }
+        elif "stop" in evt or "response" in evt:
+            event_type = "model_response"
+            payload = {"content": extract_model_response(raw_payload)}
+        else:
+            event_type = "user_request"
+            payload = {"content": raw_payload.get("lastUserInput") or raw_payload.get("prompt") or raw_payload.get("text") or raw_in}
 
-    record = {
-        "seq": seq,
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "provider": args.provider or "generic",
-        "session_id": raw_payload.get("conversationId") or raw_payload.get("sessionId") or "unknown",
-        "turn_id": raw_payload.get("stepIdx") or raw_payload.get("invocationNum"),
-        "type": event_type,
-        "payload": payload,
-        "tokens": event_tokens,
-        "truncated": is_trunc
-    }
+        payload, is_trunc = truncate_string(payload)
+        event_tokens = max(1, estimate_tokens(payload))
+        state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + event_tokens
+        state["short_log_tokens"] = state.get("short_log_tokens", 0) + event_tokens
 
-    # Append to short.log and maintain rolling context window
-    with open(mem_dir / SHORT_LOG_NAME, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\\n")
-    prune_short_log(mem_dir, state)
+        record = {
+            "seq": seq,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "provider": args.provider or "generic",
+            "session_id": raw_payload.get("conversationId") or raw_payload.get("sessionId") or "unknown",
+            "turn_id": raw_payload.get("stepIdx") or raw_payload.get("invocationNum"),
+            "type": event_type,
+            "payload": payload,
+            "tokens": event_tokens,
+            "truncated": is_trunc
+        }
 
-    # Compaction check (10k tokens)
-    uncompacted = state["total_lifetime_tokens"] - state.get("last_compacted_tokens", 0)
-    compaction_due = uncompacted >= DEFAULT_COMPACT_TOKEN_INTERVAL
-    notice = (
-        f"[MEMORY HOOK UPDATE NOTICE]: ~{uncompacted:,} tokens have accumulated since the "
-        f"last long-term memory update (Current Event: #{seq}). "
-        f"Action Required: Review uncompacted entries in .memory/short.log and update .memory/long.log."
-    )
+        # Append to short.log and maintain rolling context window
+        with open(mem_dir / SHORT_LOG_NAME, "a", encoding="utf-8", errors="replace") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\\n")
+        prune_short_log(mem_dir, state)
 
-    resp = {}
-    if args.provider == "antigravity":
-        if args.event == "PreToolUse":
-            resp = {"decision": "allow"}
-        elif args.event in ["PreInvocation", "SessionStart"]:
+        # Compaction check (10k tokens)
+        uncompacted = state["total_lifetime_tokens"] - state.get("last_compacted_tokens", 0)
+        compaction_due = uncompacted >= DEFAULT_COMPACT_TOKEN_INTERVAL
+        notice = (
+            f"[MEMORY HOOK UPDATE NOTICE]: ~{uncompacted:,} tokens have accumulated since the "
+            f"last long-term memory update (Current Event: #{seq}). "
+            f"Action Required: Review uncompacted entries in .memory/short.log and update .memory/long.log."
+        )
+
+        resp = {}
+        if args.provider == "antigravity":
+            if args.event == "PreToolUse":
+                resp = {"decision": "allow"}
+            elif args.event in ["PreInvocation", "SessionStart"]:
+                if compaction_due:
+                    resp = {"injectSteps": [{"systemMessage": {"systemMessage": notice}}]}
+                    state["last_compacted_tokens"] = state["total_lifetime_tokens"]
+                    state["last_compacted_seq"] = seq
+                else:
+                    resp = {}
+            elif args.event == "Stop":
+                resp = {"decision": "allow"}
+        else:
             if compaction_due:
-                resp = {"injectSteps": [{"systemMessage": {"systemMessage": notice}}]}
+                sys.stderr.write(f"\\n{notice}\\n")
+                sys.stderr.flush()
                 state["last_compacted_tokens"] = state["total_lifetime_tokens"]
                 state["last_compacted_seq"] = seq
-            else:
-                resp = {}
-        elif args.event == "Stop":
-            resp = {"decision": "allow"}
-    else:
-        if compaction_due:
-            sys.stderr.write(f"\\n{notice}\\n")
-            sys.stderr.flush()
-            state["last_compacted_tokens"] = state["total_lifetime_tokens"]
-            state["last_compacted_seq"] = seq
-        resp = {"status": "ok"}
+            resp = {"status": "ok"}
 
-    save_state(mem_dir, state)
-    sys.stdout.write(json.dumps(resp))
-    sys.stdout.flush()
+        save_state(mem_dir, state)
+        sys.stdout.write(json.dumps(resp))
+        sys.stdout.flush()
+    except Exception as exc:
+        sys.stderr.write(f"memory-hook runner warning: {exc}\\n")
+        sys.stderr.flush()
+        sys.stdout.write(json.dumps({"status": "ok", "decision": "allow"}))
+        sys.stdout.flush()
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
@@ -500,96 +517,123 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
     r_arg = quote_if_needed(runner_abs)
     rt_arg = quote_if_needed(root_abs)
 
-    # Antigravity
-    agents_dir = target_dir / ".agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    agents_hooks = agents_dir / "hooks.json"
-    existing_agents_hooks = {}
-    if agents_hooks.is_file():
-        try:
-            existing_agents_hooks = json.loads(agents_hooks.read_text(encoding="utf-8"))
-        except Exception:
+    installed_files: Dict[str, List[str]] = {}
+    targets = providers or ["all"]
+    if "all" in targets:
+        targets = ["antigravity", "claude", "codex", "cursor"]
+
+    for p in targets:
+        p_clean = p.lower().strip()
+        if p_clean in ["antigravity", "gemini"]:
+            # Antigravity
+            agents_dir = target_dir / ".agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            agents_hooks = agents_dir / "hooks.json"
             existing_agents_hooks = {}
-    existing_agents_hooks["memory-hook"] = {
-        "PreInvocation": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PreInvocation --root {rt_arg}'}],
-        "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PreToolUse --root {rt_arg}'}]}],
-        "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PostToolUse --root {rt_arg}'}]}],
-        "Stop": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event Stop --root {rt_arg}'}]
-    }
-    agents_hooks.write_text(json.dumps(existing_agents_hooks, indent=2), encoding="utf-8")
-    append_or_create_instructions(target_dir / "AGENTS.md", f"# Antigravity Agent Guidelines\n\n{proto_instructions}", proto_instructions)
+            if agents_hooks.is_file():
+                try:
+                    existing_agents_hooks = json.loads(agents_hooks.read_text(encoding="utf-8"))
+                except Exception:
+                    existing_agents_hooks = {}
+            existing_agents_hooks["memory-hook"] = {
+                "PreInvocation": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PreInvocation --root {rt_arg}'}],
+                "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PreToolUse --root {rt_arg}'}]}],
+                "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PostToolUse --root {rt_arg}'}]}],
+                "Stop": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event Stop --root {rt_arg}'}]
+            }
+            agents_hooks.write_text(json.dumps(existing_agents_hooks, indent=2), encoding="utf-8")
+            append_or_create_instructions(target_dir / "AGENTS.md", f"# Antigravity Agent Guidelines\n\n{proto_instructions}", proto_instructions)
+            installed_files["antigravity"] = [".agents/hooks.json", "AGENTS.md"]
 
-    # Claude Code
-    claude_dir = target_dir / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    claude_settings = claude_dir / "settings.json"
-    existing_claude_settings = {}
-    if claude_settings.is_file():
-        try:
-            existing_claude_settings = json.loads(claude_settings.read_text(encoding="utf-8"))
-        except Exception:
+        elif p_clean in ["claude", "claude-code"]:
+            # Claude Code
+            claude_dir = target_dir / ".claude"
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            claude_settings = claude_dir / "settings.json"
             existing_claude_settings = {}
-    hooks = existing_claude_settings.get("hooks", {})
-    hooks["UserPromptSubmit"] = [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event UserPromptSubmit --root "{root_abs}"'}]}]
-    hooks["PreToolUse"] = [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PreToolUse --root "{root_abs}"'}]}]
-    hooks["PostToolUse"] = [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PostToolUse --root "{root_abs}"'}]}]
-    hooks["Stop"] = [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event Stop --root "{root_abs}"'}]}]
-    existing_claude_settings["hooks"] = hooks
-    claude_settings.write_text(json.dumps(existing_claude_settings, indent=2), encoding="utf-8")
-    append_or_create_instructions(target_dir / "CLAUDE.md", f"# Claude Code Guidelines\n\n{proto_instructions}", proto_instructions)
+            if claude_settings.is_file():
+                try:
+                    existing_claude_settings = json.loads(claude_settings.read_text(encoding="utf-8"))
+                except Exception:
+                    existing_claude_settings = {}
+            hooks = existing_claude_settings.get("hooks", {})
+            hooks["UserPromptSubmit"] = [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event UserPromptSubmit --root "{root_abs}"'}]}]
+            hooks["PreToolUse"] = [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PreToolUse --root "{root_abs}"'}]}]
+            hooks["PostToolUse"] = [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PostToolUse --root "{root_abs}"'}]}]
+            hooks["Stop"] = [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event Stop --root "{root_abs}"'}]}]
+            existing_claude_settings["hooks"] = hooks
+            claude_settings.write_text(json.dumps(existing_claude_settings, indent=2), encoding="utf-8")
+            append_or_create_instructions(target_dir / "CLAUDE.md", f"# Claude Code Guidelines\n\n{proto_instructions}", proto_instructions)
+            installed_files["claude"] = [".claude/settings.json", "CLAUDE.md"]
 
-    # Codex
-    codex_dir = target_dir / ".codex"
-    codex_dir.mkdir(parents=True, exist_ok=True)
-    codex_hooks = codex_dir / "hooks.json"
-    existing_codex_hooks = {}
-    if codex_hooks.is_file():
-        try:
-            existing_codex_hooks = json.loads(codex_hooks.read_text(encoding="utf-8"))
-        except Exception:
+        elif p_clean in ["codex", "openai"]:
+            # Codex
+            codex_dir = target_dir / ".codex"
+            codex_dir.mkdir(parents=True, exist_ok=True)
+            codex_hooks = codex_dir / "hooks.json"
             existing_codex_hooks = {}
-    existing_codex_hooks["UserPromptSubmit"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event UserPromptSubmit --root "{root_abs}"'}]
-    existing_codex_hooks["PreToolUse"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PreToolUse --root "{root_abs}"'}]
-    existing_codex_hooks["PostToolUse"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PostToolUse --root "{root_abs}"'}]
-    existing_codex_hooks["Stop"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event Stop --root "{root_abs}"'}]
-    codex_hooks.write_text(json.dumps(existing_codex_hooks, indent=2), encoding="utf-8")
-    append_or_create_instructions(target_dir / "CODEX.md", f"# Codex Guidelines\n\n{proto_instructions}", proto_instructions)
+            if codex_hooks.is_file():
+                try:
+                    existing_codex_hooks = json.loads(codex_hooks.read_text(encoding="utf-8"))
+                except Exception:
+                    existing_codex_hooks = {}
+            existing_codex_hooks["UserPromptSubmit"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event UserPromptSubmit --root "{root_abs}"'}]
+            existing_codex_hooks["PreToolUse"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PreToolUse --root "{root_abs}"'}]
+            existing_codex_hooks["PostToolUse"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PostToolUse --root "{root_abs}"'}]
+            existing_codex_hooks["Stop"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event Stop --root "{root_abs}"'}]
+            codex_hooks.write_text(json.dumps(existing_codex_hooks, indent=2), encoding="utf-8")
+            append_or_create_instructions(target_dir / "CODEX.md", f"# Codex Guidelines\n\n{proto_instructions}", proto_instructions)
+            installed_files["codex"] = [".codex/hooks.json", "CODEX.md"]
 
-    # Cursor
-    cursor_dir = target_dir / ".cursor"
-    cursor_dir.mkdir(parents=True, exist_ok=True)
-    cursor_hooks = cursor_dir / "hooks.json"
-    existing_cursor_hooks = {}
-    if cursor_hooks.is_file():
-        try:
-            existing_cursor_hooks = json.loads(cursor_hooks.read_text(encoding="utf-8"))
-        except Exception:
+        elif p_clean in ["cursor"]:
+            # Cursor
+            cursor_dir = target_dir / ".cursor"
+            cursor_dir.mkdir(parents=True, exist_ok=True)
+            cursor_hooks = cursor_dir / "hooks.json"
             existing_cursor_hooks = {}
-    existing_cursor_hooks["beforeSubmitPrompt"] = [{"command": f'python "{runner_abs}" --provider cursor --event beforeSubmitPrompt --root "{root_abs}"'}]
-    existing_cursor_hooks["preToolUse"] = [{"command": f'python "{runner_abs}" --provider cursor --event preToolUse --root "{root_abs}"'}]
-    existing_cursor_hooks["postToolUse"] = [{"command": f'python "{runner_abs}" --provider cursor --event postToolUse --root "{root_abs}"'}]
-    existing_cursor_hooks["stop"] = [{"command": f'python "{runner_abs}" --provider cursor --event stop --root "{root_abs}"'}]
-    cursor_hooks.write_text(json.dumps(existing_cursor_hooks, indent=2), encoding="utf-8")
-    append_or_create_instructions(target_dir / ".cursorrules", f"# Cursor Rules\n\n{proto_instructions}", proto_instructions)
+            if cursor_hooks.is_file():
+                try:
+                    existing_cursor_hooks = json.loads(cursor_hooks.read_text(encoding="utf-8"))
+                except Exception:
+                    existing_cursor_hooks = {}
+            existing_cursor_hooks["beforeSubmitPrompt"] = [{"command": f'python "{runner_abs}" --provider cursor --event beforeSubmitPrompt --root "{root_abs}"'}]
+            existing_cursor_hooks["preToolUse"] = [{"command": f'python "{runner_abs}" --provider cursor --event preToolUse --root "{root_abs}"'}]
+            existing_cursor_hooks["postToolUse"] = [{"command": f'python "{runner_abs}" --provider cursor --event postToolUse --root "{root_abs}"'}]
+            existing_cursor_hooks["stop"] = [{"command": f'python "{runner_abs}" --provider cursor --event stop --root "{root_abs}"'}]
+            cursor_hooks.write_text(json.dumps(existing_cursor_hooks, indent=2), encoding="utf-8")
+            append_or_create_instructions(target_dir / ".cursorrules", f"# Cursor Rules\n\n{proto_instructions}", proto_instructions)
+            installed_files["cursor"] = [".cursor/hooks.json", ".cursorrules"]
 
-    return {
-        "antigravity": [".agents/hooks.json", "AGENTS.md"],
-        "claude": [".claude/settings.json", "CLAUDE.md"],
-        "codex": [".codex/hooks.json", "CODEX.md"],
-        "cursor": [".cursor/hooks.json", ".cursorrules"],
-    }
+    return installed_files
 
 
 def main():
-    target_dir = Path.cwd()
-    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-        target_dir = Path(sys.argv[1]).resolve()
+    parser = argparse.ArgumentParser(
+        prog="install.py",
+        description="Universal standalone installer for memory-hook.",
+    )
+    parser.add_argument(
+        "target_path",
+        nargs="?",
+        default=None,
+        help="Target directory to install memory-hook into (default: current directory)",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["all", "antigravity", "claude", "codex", "cursor"],
+        default="all",
+        help="Specific provider to configure (default: all)",
+    )
+    args = parser.parse_args()
+
+    target_dir = Path(args.target_path).resolve() if args.target_path else Path.cwd().resolve()
+    providers = [args.provider] if args.provider != "all" else ["all"]
 
     print(f"Installing universal memory-hook into: {target_dir}")
     if install_hooks is not None:
-        installed = install_hooks(target_dir, providers=["all"])
+        installed = install_hooks(target_dir, providers=providers)
     else:
-        installed = _standalone_install(target_dir)
+        installed = _standalone_install(target_dir, providers=providers)
 
     print("\n✓ Installation successful!")
     print("Configured providers:")

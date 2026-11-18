@@ -72,7 +72,7 @@ def append_to_short_log(memory_dir: Path, event: Dict[str, Any]) -> None:
     """Safely appends a JSONL record to short.log."""
     short_log_path = memory_dir / SHORT_LOG_NAME
     line = json.dumps(event, ensure_ascii=False) + "\n"
-    with open(short_log_path, "a", encoding="utf-8") as f:
+    with open(short_log_path, "a", encoding="utf-8", errors="replace") as f:
         f.write(line)
         f.flush()
         try:
@@ -264,21 +264,29 @@ def run_hook(
 
 def main() -> None:
     """CLI entrypoint for executing the hook."""
-    parser = argparse.ArgumentParser(description="Cross-provider memory hook runner")
-    parser.add_argument("--event", type=str, help="Lifecycle event name")
-    parser.add_argument("--provider", type=str, help="Provider identifier hint")
-    parser.add_argument("--root", type=str, help="Project root directory path")
-    args = parser.parse_args()
-
-    # Read stdin safely
-    raw_input_data = ""
     try:
-        if not sys.stdin.isatty():
-            raw_input_data = sys.stdin.read()
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
     try:
+        parser = argparse.ArgumentParser(description="Cross-provider memory hook runner")
+        parser.add_argument("--event", type=str, help="Lifecycle event name")
+        parser.add_argument("--provider", type=str, help="Provider identifier hint")
+        parser.add_argument("--root", type=str, help="Project root directory path")
+        args = parser.parse_args()
+
+        # Read stdin safely
+        raw_input_data = ""
+        try:
+            if not sys.stdin.isatty():
+                raw_input_data = sys.stdin.read()
+        except Exception:
+            pass
+
         root_path = Path(args.root) if args.root else None
         result = run_hook(
             event_hint=args.event,

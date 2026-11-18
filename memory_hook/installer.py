@@ -291,118 +291,133 @@ def save_state(mem_dir, data):
         pass
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--event", type=str, default="")
-    parser.add_argument("--provider", type=str, default="")
-    parser.add_argument("--root", type=str, default="")
-    args = parser.parse_args()
-
-    raw_in = ""
     try:
-        if not sys.stdin.isatty():
-            raw_in = sys.stdin.read()
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
-    raw_payload = {}
-    if raw_in:
+    try:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--event", type=str, default="")
+        parser.add_argument("--provider", type=str, default="")
+        parser.add_argument("--root", type=str, default="")
+        args = parser.parse_args()
+
+        raw_in = ""
         try:
-            raw_payload = json.loads(raw_in)
+            if not sys.stdin.isatty():
+                raw_in = sys.stdin.read()
         except Exception:
-            raw_payload = {"raw": raw_in}
+            pass
 
-    root = Path(args.root).resolve() if args.root else find_project_root()
-    mem_dir = root / MEMORY_DIR_NAME
-    mem_dir.mkdir(parents=True, exist_ok=True)
-    migrate_legacy_txt_files(mem_dir)
+        raw_payload = {}
+        if raw_in:
+            try:
+                raw_payload = json.loads(raw_in)
+            except Exception:
+                raw_payload = {"raw": raw_in}
 
-    state = load_state(mem_dir)
-    seq = state.get("current_seq", 0) + 1
-    state["current_seq"] = seq
-    state["total_events"] = state.get("total_events", 0) + 1
-    state["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
-    if args.provider:
-        state["last_updated_provider"] = args.provider
+        root = Path(args.root).resolve() if args.root else find_project_root()
+        mem_dir = root / MEMORY_DIR_NAME
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        migrate_legacy_txt_files(mem_dir)
 
-    # Determine event type
-    evt = args.event.lower()
-    event_type = "user_request"
-    payload = {}
-    is_trunc = False
+        state = load_state(mem_dir)
+        seq = state.get("current_seq", 0) + 1
+        state["current_seq"] = seq
+        state["total_events"] = state.get("total_events", 0) + 1
+        state["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
+        if args.provider:
+            state["last_updated_provider"] = args.provider
 
-    if "pretool" in evt:
-        event_type = "tool_call"
-        tc = raw_payload.get("toolCall") or raw_payload.get("tool_input") or {}
-        payload = {"tool": raw_payload.get("tool_name") or raw_payload.get("name") or "tool", "args": tc}
-    elif "posttool" in evt:
-        event_type = "tool_result"
-        payload = {
-            "status": "error" if raw_payload.get("error") else "success",
-            "output": raw_payload.get("tool_response") or raw_payload.get("result") or raw_payload.get("output") or "",
-            "error": raw_payload.get("error")
-        }
-    elif "stop" in evt or "response" in evt:
-        event_type = "model_response"
-        payload = {"content": extract_model_response(raw_payload)}
-    else:
+        # Determine event type
+        evt = args.event.lower()
         event_type = "user_request"
-        payload = {"content": raw_payload.get("lastUserInput") or raw_payload.get("prompt") or raw_payload.get("text") or raw_in}
+        payload = {}
+        is_trunc = False
 
-    payload, is_trunc = truncate_string(payload)
-    event_tokens = max(1, estimate_tokens(payload))
-    state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + event_tokens
-    state["short_log_tokens"] = state.get("short_log_tokens", 0) + event_tokens
+        if "pretool" in evt:
+            event_type = "tool_call"
+            tc = raw_payload.get("toolCall") or raw_payload.get("tool_input") or {}
+            payload = {"tool": raw_payload.get("tool_name") or raw_payload.get("name") or "tool", "args": tc}
+        elif "posttool" in evt:
+            event_type = "tool_result"
+            payload = {
+                "status": "error" if raw_payload.get("error") else "success",
+                "output": raw_payload.get("tool_response") or raw_payload.get("result") or raw_payload.get("output") or "",
+                "error": raw_payload.get("error")
+            }
+        elif "stop" in evt or "response" in evt:
+            event_type = "model_response"
+            payload = {"content": extract_model_response(raw_payload)}
+        else:
+            event_type = "user_request"
+            payload = {"content": raw_payload.get("lastUserInput") or raw_payload.get("prompt") or raw_payload.get("text") or raw_in}
 
-    record = {
-        "seq": seq,
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "provider": args.provider or "generic",
-        "session_id": raw_payload.get("conversationId") or raw_payload.get("sessionId") or "unknown",
-        "turn_id": raw_payload.get("stepIdx") or raw_payload.get("invocationNum"),
-        "type": event_type,
-        "payload": payload,
-        "tokens": event_tokens,
-        "truncated": is_trunc
-    }
+        payload, is_trunc = truncate_string(payload)
+        event_tokens = max(1, estimate_tokens(payload))
+        state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + event_tokens
+        state["short_log_tokens"] = state.get("short_log_tokens", 0) + event_tokens
 
-    # Append to short.log and maintain rolling context window
-    with open(mem_dir / SHORT_LOG_NAME, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\\n")
-    prune_short_log(mem_dir, state)
+        record = {
+            "seq": seq,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "provider": args.provider or "generic",
+            "session_id": raw_payload.get("conversationId") or raw_payload.get("sessionId") or "unknown",
+            "turn_id": raw_payload.get("stepIdx") or raw_payload.get("invocationNum"),
+            "type": event_type,
+            "payload": payload,
+            "tokens": event_tokens,
+            "truncated": is_trunc
+        }
 
-    # Compaction check (10k tokens)
-    uncompacted = state["total_lifetime_tokens"] - state.get("last_compacted_tokens", 0)
-    compaction_due = uncompacted >= DEFAULT_COMPACT_TOKEN_INTERVAL
-    notice = (
-        f"[MEMORY HOOK UPDATE NOTICE]: ~{uncompacted:,} tokens have accumulated since the "
-        f"last long-term memory update (Current Event: #{seq}). "
-        f"Action Required: Review uncompacted entries in .memory/short.log and update .memory/long.log."
-    )
+        # Append to short.log and maintain rolling context window
+        with open(mem_dir / SHORT_LOG_NAME, "a", encoding="utf-8", errors="replace") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\\n")
+        prune_short_log(mem_dir, state)
 
-    resp = {}
-    if args.provider == "antigravity":
-        if args.event == "PreToolUse":
-            resp = {"decision": "allow"}
-        elif args.event in ["PreInvocation", "SessionStart"]:
+        # Compaction check (10k tokens)
+        uncompacted = state["total_lifetime_tokens"] - state.get("last_compacted_tokens", 0)
+        compaction_due = uncompacted >= DEFAULT_COMPACT_TOKEN_INTERVAL
+        notice = (
+            f"[MEMORY HOOK UPDATE NOTICE]: ~{uncompacted:,} tokens have accumulated since the "
+            f"last long-term memory update (Current Event: #{seq}). "
+            f"Action Required: Review uncompacted entries in .memory/short.log and update .memory/long.log."
+        )
+
+        resp = {}
+        if args.provider == "antigravity":
+            if args.event == "PreToolUse":
+                resp = {"decision": "allow"}
+            elif args.event in ["PreInvocation", "SessionStart"]:
+                if compaction_due:
+                    resp = {"injectSteps": [{"systemMessage": {"systemMessage": notice}}]}
+                    state["last_compacted_tokens"] = state["total_lifetime_tokens"]
+                    state["last_compacted_seq"] = seq
+                else:
+                    resp = {}
+            elif args.event == "Stop":
+                resp = {"decision": "allow"}
+        else:
             if compaction_due:
-                resp = {"injectSteps": [{"systemMessage": {"systemMessage": notice}}]}
+                sys.stderr.write(f"\\n{notice}\\n")
+                sys.stderr.flush()
                 state["last_compacted_tokens"] = state["total_lifetime_tokens"]
                 state["last_compacted_seq"] = seq
-            else:
-                resp = {}
-        elif args.event == "Stop":
-            resp = {"decision": "allow"}
-    else:
-        if compaction_due:
-            sys.stderr.write(f"\\n{notice}\\n")
-            sys.stderr.flush()
-            state["last_compacted_tokens"] = state["total_lifetime_tokens"]
-            state["last_compacted_seq"] = seq
-        resp = {"status": "ok"}
+            resp = {"status": "ok"}
 
-    save_state(mem_dir, state)
-    sys.stdout.write(json.dumps(resp))
-    sys.stdout.flush()
+        save_state(mem_dir, state)
+        sys.stdout.write(json.dumps(resp))
+        sys.stdout.flush()
+    except Exception as exc:
+        sys.stderr.write(f"memory-hook runner warning: {exc}\\n")
+        sys.stderr.flush()
+        sys.stdout.write(json.dumps({"status": "ok", "decision": "allow"}))
+        sys.stdout.flush()
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
