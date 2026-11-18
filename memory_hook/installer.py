@@ -22,6 +22,7 @@ from .constants import (
     SUPPORTED_PROVIDERS,
 )
 from .instructions import (
+    AGENT_MEMORY_INSTRUCTIONS,
     LONG_LOG_TEMPLATE,
     get_agents_md_content,
     get_claude_md_content,
@@ -289,6 +290,24 @@ if __name__ == "__main__":
         pass
 
 
+def append_or_create_instructions(
+    file_path: Path,
+    full_new_content: str,
+    append_protocol: str = AGENT_MEMORY_INSTRUCTIONS,
+) -> None:
+    """Creates instruction file or appends memory protocol at the bottom as separate section."""
+    if not file_path.exists():
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(full_new_content.strip() + "\n")
+    else:
+        with open(file_path, "r", encoding="utf-8") as f:
+            existing = f.read()
+        if "Universal Memory Hook Protocol" not in existing:
+            separator = "\n\n---\n\n" if existing.strip() else ""
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(separator + append_protocol.strip() + "\n")
+
+
 def install_antigravity(project_root: Path) -> List[Path]:
     """Configures Antigravity .agents/hooks.json and AGENTS.md."""
     agents_dir = project_root / ".agents"
@@ -349,17 +368,7 @@ def install_antigravity(project_root: Path) -> List[Path]:
 
     # Instructions
     agents_md = project_root / "AGENTS.md"
-    content = get_agents_md_content()
-    if not agents_md.exists():
-        with open(agents_md, "w", encoding="utf-8") as f:
-            f.write(content)
-    else:
-        with open(agents_md, "r", encoding="utf-8") as f:
-            current = f.read()
-        if "Universal Memory Hook Protocol" not in current:
-            with open(agents_md, "a", encoding="utf-8") as f:
-                f.write("\n\n" + content)
-
+    append_or_create_instructions(agents_md, get_agents_md_content())
     return [hooks_file, agents_md]
 
 
@@ -433,17 +442,7 @@ def install_claude(project_root: Path) -> List[Path]:
 
     # Instructions
     claude_md = project_root / "CLAUDE.md"
-    content = get_claude_md_content()
-    if not claude_md.exists():
-        with open(claude_md, "w", encoding="utf-8") as f:
-            f.write(content)
-    else:
-        with open(claude_md, "r", encoding="utf-8") as f:
-            current = f.read()
-        if "Universal Memory Hook Protocol" not in current:
-            with open(claude_md, "a", encoding="utf-8") as f:
-                f.write("\n\n" + content)
-
+    append_or_create_instructions(claude_md, get_claude_md_content())
     return [settings_file, claude_md]
 
 
@@ -481,17 +480,7 @@ def install_codex(project_root: Path) -> List[Path]:
         json.dump(existing_hooks, f, indent=2, ensure_ascii=False)
 
     codex_md = project_root / "CODEX.md"
-    content = get_codex_md_content()
-    if not codex_md.exists():
-        with open(codex_md, "w", encoding="utf-8") as f:
-            f.write(content)
-    else:
-        with open(codex_md, "r", encoding="utf-8") as f:
-            current = f.read()
-        if "Universal Memory Hook Protocol" not in current:
-            with open(codex_md, "a", encoding="utf-8") as f:
-                f.write("\n\n" + content)
-
+    append_or_create_instructions(codex_md, get_codex_md_content())
     return [hooks_file, codex_md]
 
 
@@ -529,17 +518,7 @@ def install_cursor(project_root: Path) -> List[Path]:
         json.dump(existing_hooks, f, indent=2, ensure_ascii=False)
 
     cursorrules = project_root / ".cursorrules"
-    content = get_cursorrules_content()
-    if not cursorrules.exists():
-        with open(cursorrules, "w", encoding="utf-8") as f:
-            f.write(content)
-    else:
-        with open(cursorrules, "r", encoding="utf-8") as f:
-            current = f.read()
-        if "Universal Memory Hook Protocol" not in current:
-            with open(cursorrules, "a", encoding="utf-8") as f:
-                f.write("\n\n" + content)
-
+    append_or_create_instructions(cursorrules, get_cursorrules_content())
     return [hooks_file, cursorrules]
 
 

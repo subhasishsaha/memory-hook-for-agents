@@ -1,4 +1,5 @@
 # Byte-compiled / optimized / DLL files
+**/__pycache__/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -21,7 +22,9 @@ htmlcov/
 
 # Logs
 *.log
-!tests/**
+!tests/**/*.py
+!tests/**/*.json
+!tests/**/*.log
 
 # Runtime memory hook state
 .memory/

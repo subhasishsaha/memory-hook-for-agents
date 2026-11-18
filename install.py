@@ -308,11 +308,28 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
 
 1. **Context Restoration at Session Start**:
    - At the beginning of every session or task, read `.memory/long.log` first.
-   - If needed, read the last 15 lines of `.memory/short.log` to catch up on recent actions.
+   - If needed, read the last 15 lines of `.memory/short.log` to catch up on the most recent actions taken by any previous agent (Claude, Antigravity, Codex, Cursor).
+   - Never ask the user to re-explain what the project is about or what has already been built.
 
 2. **Long-Term Memory Compaction**:
-   - Whenever you receive a `[MEMORY HOOK UPDATE NOTICE]`, review `.memory/short.log` and update `.memory/long.log`.
+   - Whenever you receive a `[MEMORY HOOK UPDATE NOTICE]` indicating 10 new events have been logged, review the uncompacted tail of `.memory/short.log` alongside the existing `.memory/long.log`.
+   - Use your model tools (`edit_file` or `write_file`) to update `.memory/long.log`:
+     - Update the header metadata: `Last Updated`, `Provider`, and `Synced Through Event: #<seq>`.
+     - Update **Completed Work & Milestones** with newly finished items.
+     - Update **Current State & Active Focus** with what you are working on right now.
+     - Update **Next Immediate Steps** with pending tasks.
+     - Preserve and append any newly established **Architecture & Core Decisions**.
+     - Keep content concise, high-density, and structured.
 """
+
+    def append_or_create_instructions(file_path: Path, full_new_content: str, append_protocol: str) -> None:
+        if not file_path.exists():
+            file_path.write_text(full_new_content.strip() + "\n", encoding="utf-8")
+        else:
+            existing = file_path.read_text(encoding="utf-8")
+            if "Universal Memory Hook Protocol" not in existing:
+                separator = "\n\n---\n\n" if existing.strip() else ""
+                file_path.write_text(existing.rstrip() + separator + append_protocol.strip() + "\n", encoding="utf-8")
 
     root_abs = target_dir.resolve().as_posix()
     runner_abs = (target_dir / ".memory" / "bin" / "memory_hook_runner.py").resolve().as_posix()
@@ -321,77 +338,73 @@ All agent activities (user requests, tool calls, tool responses, model outputs) 
     agents_dir = target_dir / ".agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     agents_hooks = agents_dir / "hooks.json"
-    agents_hooks.write_text(
-        json.dumps(
-            {
-                "memory-hook": {
-                    "PreInvocation": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PreInvocation --root "{root_abs}"'}],
-                    "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PreToolUse --root "{root_abs}"'}]}],
-                    "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PostToolUse --root "{root_abs}"'}]}],
-                    "Stop": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event Stop --root "{root_abs}"'}]
-                }
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    (target_dir / "AGENTS.md").write_text(f"# Antigravity Agent Guidelines\n\n{proto_instructions}", encoding="utf-8")
+    existing_agents_hooks = {}
+    if agents_hooks.is_file():
+        try:
+            existing_agents_hooks = json.loads(agents_hooks.read_text(encoding="utf-8"))
+        except Exception:
+            existing_agents_hooks = {}
+    existing_agents_hooks["memory-hook"] = {
+        "PreInvocation": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PreInvocation --root "{root_abs}"'}],
+        "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PreToolUse --root "{root_abs}"'}]}],
+        "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event PostToolUse --root "{root_abs}"'}]}],
+        "Stop": [{"type": "command", "command": f'python "{runner_abs}" --provider antigravity --event Stop --root "{root_abs}"'}]
+    }
+    agents_hooks.write_text(json.dumps(existing_agents_hooks, indent=2), encoding="utf-8")
+    append_or_create_instructions(target_dir / "AGENTS.md", f"# Antigravity Agent Guidelines\n\n{proto_instructions}", proto_instructions)
 
     # Claude Code
     claude_dir = target_dir / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     claude_settings = claude_dir / "settings.json"
-    claude_settings.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event UserPromptSubmit --root "{root_abs}"'}]}],
-                    "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PreToolUse --root "{root_abs}"'}]}],
-                    "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PostToolUse --root "{root_abs}"'}]}],
-                    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event Stop --root "{root_abs}"'}]}]
-                }
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    (target_dir / "CLAUDE.md").write_text(f"# Claude Code Guidelines\n\n{proto_instructions}", encoding="utf-8")
+    existing_claude_settings = {}
+    if claude_settings.is_file():
+        try:
+            existing_claude_settings = json.loads(claude_settings.read_text(encoding="utf-8"))
+        except Exception:
+            existing_claude_settings = {}
+    hooks = existing_claude_settings.get("hooks", {})
+    hooks["UserPromptSubmit"] = [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event UserPromptSubmit --root "{root_abs}"'}]}]
+    hooks["PreToolUse"] = [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PreToolUse --root "{root_abs}"'}]}]
+    hooks["PostToolUse"] = [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event PostToolUse --root "{root_abs}"'}]}]
+    hooks["Stop"] = [{"matcher": "", "hooks": [{"type": "command", "command": f'python "{runner_abs}" --provider claude-code --event Stop --root "{root_abs}"'}]}]
+    existing_claude_settings["hooks"] = hooks
+    claude_settings.write_text(json.dumps(existing_claude_settings, indent=2), encoding="utf-8")
+    append_or_create_instructions(target_dir / "CLAUDE.md", f"# Claude Code Guidelines\n\n{proto_instructions}", proto_instructions)
 
     # Codex
     codex_dir = target_dir / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
     codex_hooks = codex_dir / "hooks.json"
-    codex_hooks.write_text(
-        json.dumps(
-            {
-                "UserPromptSubmit": [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event UserPromptSubmit --root "{root_abs}"'}],
-                "PreToolUse": [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PreToolUse --root "{root_abs}"'}],
-                "PostToolUse": [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PostToolUse --root "{root_abs}"'}],
-                "Stop": [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event Stop --root "{root_abs}"'}]
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    (target_dir / "CODEX.md").write_text(f"# Codex Guidelines\n\n{proto_instructions}", encoding="utf-8")
+    existing_codex_hooks = {}
+    if codex_hooks.is_file():
+        try:
+            existing_codex_hooks = json.loads(codex_hooks.read_text(encoding="utf-8"))
+        except Exception:
+            existing_codex_hooks = {}
+    existing_codex_hooks["UserPromptSubmit"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event UserPromptSubmit --root "{root_abs}"'}]
+    existing_codex_hooks["PreToolUse"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PreToolUse --root "{root_abs}"'}]
+    existing_codex_hooks["PostToolUse"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event PostToolUse --root "{root_abs}"'}]
+    existing_codex_hooks["Stop"] = [{"type": "command", "command": f'python "{runner_abs}" --provider codex --event Stop --root "{root_abs}"'}]
+    codex_hooks.write_text(json.dumps(existing_codex_hooks, indent=2), encoding="utf-8")
+    append_or_create_instructions(target_dir / "CODEX.md", f"# Codex Guidelines\n\n{proto_instructions}", proto_instructions)
 
     # Cursor
     cursor_dir = target_dir / ".cursor"
     cursor_dir.mkdir(parents=True, exist_ok=True)
     cursor_hooks = cursor_dir / "hooks.json"
-    cursor_hooks.write_text(
-        json.dumps(
-            {
-                "beforeSubmitPrompt": [{"command": f'python "{runner_abs}" --provider cursor --event beforeSubmitPrompt --root "{root_abs}"'}],
-                "preToolUse": [{"command": f'python "{runner_abs}" --provider cursor --event preToolUse --root "{root_abs}"'}],
-                "postToolUse": [{"command": f'python "{runner_abs}" --provider cursor --event postToolUse --root "{root_abs}"'}],
-                "stop": [{"command": f'python "{runner_abs}" --provider cursor --event stop --root "{root_abs}"'}]
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    (target_dir / ".cursorrules").write_text(f"# Cursor Rules\n\n{proto_instructions}", encoding="utf-8")
+    existing_cursor_hooks = {}
+    if cursor_hooks.is_file():
+        try:
+            existing_cursor_hooks = json.loads(cursor_hooks.read_text(encoding="utf-8"))
+        except Exception:
+            existing_cursor_hooks = {}
+    existing_cursor_hooks["beforeSubmitPrompt"] = [{"command": f'python "{runner_abs}" --provider cursor --event beforeSubmitPrompt --root "{root_abs}"'}]
+    existing_cursor_hooks["preToolUse"] = [{"command": f'python "{runner_abs}" --provider cursor --event preToolUse --root "{root_abs}"'}]
+    existing_cursor_hooks["postToolUse"] = [{"command": f'python "{runner_abs}" --provider cursor --event postToolUse --root "{root_abs}"'}]
+    existing_cursor_hooks["stop"] = [{"command": f'python "{runner_abs}" --provider cursor --event stop --root "{root_abs}"'}]
+    cursor_hooks.write_text(json.dumps(existing_cursor_hooks, indent=2), encoding="utf-8")
+    append_or_create_instructions(target_dir / ".cursorrules", f"# Cursor Rules\n\n{proto_instructions}", proto_instructions)
 
     return {
         "antigravity": [".agents/hooks.json", "AGENTS.md"],

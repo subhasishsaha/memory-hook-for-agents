@@ -62,6 +62,58 @@ class TestInstaller(unittest.TestCase):
         self.assertTrue(cursor_json.is_file())
         self.assertTrue(cursorrules.is_file())
 
+    def test_existing_agents_md_preservation_and_append(self):
+        # 1. Pre-create an AGENTS.md with original project guidelines
+        agents_md = self.root / "AGENTS.md"
+        original_content = (
+            "# RegioDB Project Guidelines\n\n"
+            "## Architecture Rules\n"
+            "- Invariant: max_point >= 2 * min_point\n"
+            "- Always use pathlib.Path\n"
+        )
+        agents_md.write_text(original_content, encoding="utf-8")
+
+        # 2. Run install_hooks
+        install_hooks(self.root, providers=["antigravity"])
+
+        # 3. Read back and verify original instructions are preserved
+        updated = agents_md.read_text(encoding="utf-8")
+        self.assertTrue(updated.startswith("# RegioDB Project Guidelines"))
+        self.assertIn("- Invariant: max_point >= 2 * min_point", updated)
+        self.assertIn("- Always use pathlib.Path", updated)
+
+        # 4. Verify memory hook protocol is appended with separator
+        self.assertIn("---", updated)
+        self.assertIn("Universal Memory Hook Protocol (.memory/)", updated)
+
+        # 5. Verify no duplicate header inserted
+        self.assertNotIn("# Antigravity Agent Guidelines", updated)
+
+        # 6. Re-run install and verify no duplicate protocol appended
+        install_hooks(self.root, providers=["antigravity"])
+        re_updated = agents_md.read_text(encoding="utf-8")
+        self.assertEqual(re_updated.count("Universal Memory Hook Protocol"), 1)
+
+    def test_standalone_install_preserves_existing_agents_md(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("install_mod", Path(__file__).resolve().parent.parent / "install.py")
+        install_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(install_mod)
+
+        # Pre-create AGENTS.md
+        agents_md = self.root / "AGENTS.md"
+        agents_md.write_text("# Custom Instructions\n- Do not delete me.\n", encoding="utf-8")
+
+        # Run standalone install
+        install_mod._standalone_install(self.root)
+
+        updated = agents_md.read_text(encoding="utf-8")
+        self.assertTrue(updated.startswith("# Custom Instructions"))
+        self.assertIn("- Do not delete me.", updated)
+        self.assertIn("---", updated)
+        self.assertIn("Universal Memory Hook Protocol (.memory/)", updated)
+        self.assertEqual(updated.count("Universal Memory Hook Protocol"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
