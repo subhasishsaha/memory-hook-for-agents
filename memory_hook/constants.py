@@ -10,7 +10,10 @@ STATE_FILE_NAME = "state.json"
 BIN_DIR_NAME = "bin"
 RUNNER_SCRIPT_NAME = "memory_hook_runner.py"
 
-DEFAULT_COMPACT_INTERVAL = 10  # Messages/events before triggering long.log update
+DEFAULT_COMPACT_INTERVAL = 10  # Legacy event-count fallback
+DEFAULT_COMPACT_TOKEN_INTERVAL = 10000  # Trigger long.log compaction notice every 10k tokens
+MAX_SHORT_LOG_TOKENS = 100000  # Rolling context window cap for short.log (100k tokens)
+CHARS_PER_TOKEN = 4  # Standard text/code token estimation ratio (1 token ~= 4 chars)
 
 # Canonical Event Types in short.log
 EVENT_USER_REQUEST = "user_request"

@@ -105,7 +105,12 @@ class TestCrossProviderHandoff(unittest.TestCase):
             provider_hint="codex",
             raw_input_data=json.dumps({
                 "tool": "apply_patch",
-                "args": {"path": "src/auth.ts"},
+                "args": {
+                    "path": "src/auth.ts",
+                    "chunk1": "X" * 15000,
+                    "chunk2": "Y" * 15000,
+                    "chunk3": "Z" * 15000,
+                },
             }),
             project_root=self.root,
         )
@@ -121,10 +126,11 @@ class TestCrossProviderHandoff(unittest.TestCase):
         self.assertEqual(lines[4]["provider"], "claude-code")
         self.assertEqual(lines[8]["provider"], "codex")
 
-        # 4. Verify Compaction state: after 10 messages, compaction was marked
+        # 4. Verify Compaction state: after accumulating 10k tokens, compaction was marked
         state = MemoryState(self.mem_dir)
         self.assertEqual(state.current_seq, 10)
         self.assertEqual(state.last_compacted_seq, 10)
+        self.assertGreaterEqual(state.last_compacted_tokens, 10000)
 
         # 5. Simulate model updating long.log with the synthesized context
         long_log_path = self.mem_dir / LONG_LOG_NAME

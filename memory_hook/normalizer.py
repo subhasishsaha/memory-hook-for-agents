@@ -70,6 +70,21 @@ def extract_model_response(raw_payload: Dict[str, Any]) -> str:
     return ""
 
 
+def estimate_tokens(val: Any) -> int:
+    """Estimates token count of a value using the standard 1 token ~= 4 chars heuristic."""
+    if val is None:
+        return 0
+    if isinstance(val, (int, float, bool)):
+        return 1
+    if isinstance(val, str):
+        return max(1, len(val) // 4) if val else 0
+    try:
+        serialized = json.dumps(val, ensure_ascii=False)
+        return max(1, len(serialized) // 4) if serialized else 0
+    except Exception:
+        return max(1, len(str(val)) // 4)
+
+
 def truncate_string(val: Any, max_len: int = MAX_PAYLOAD_STRING_LENGTH) -> Tuple[Any, bool]:
     """Truncates string values if they exceed maximum length, flagging truncation."""
     if isinstance(val, str):
@@ -288,5 +303,6 @@ def normalize_event(
         "turn_id": turn_id,
         "type": event_type,
         "payload": payload,
+        "tokens": max(1, estimate_tokens(payload)),
         "truncated": is_truncated,
     }

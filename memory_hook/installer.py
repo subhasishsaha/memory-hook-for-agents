@@ -39,13 +39,40 @@ def initialize_memory_directory(project_root: Path) -> Path:
     memory_dir.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Initialize short.log if not exists
+    # 0. Migrate any legacy .txt files (short.txt, long.txt) to .log
+    short_txt = memory_dir / "short.txt"
     short_log = memory_dir / SHORT_LOG_NAME
+    if short_txt.is_file():
+        if not short_log.is_file():
+            try:
+                short_txt.rename(short_log)
+            except Exception:
+                pass
+        else:
+            try:
+                short_txt.unlink()
+            except Exception:
+                pass
+
+    long_txt = memory_dir / "long.txt"
+    long_log = memory_dir / LONG_LOG_NAME
+    if long_txt.is_file():
+        if not long_log.is_file():
+            try:
+                long_txt.rename(long_log)
+            except Exception:
+                pass
+        else:
+            try:
+                long_txt.unlink()
+            except Exception:
+                pass
+
+    # 1. Initialize short.log if not exists
     if not short_log.exists():
         short_log.touch()
 
     # 2. Initialize long.log if not exists
-    long_log = memory_dir / LONG_LOG_NAME
     if not long_log.exists():
         now_iso = datetime.now(timezone.utc).isoformat()
         initial_content = LONG_LOG_TEMPLATE.format(
@@ -80,14 +107,94 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 MEMORY_DIR_NAME = ".memory"
 SHORT_LOG_NAME = "short.log"
+LONG_LOG_NAME = "long.log"
 STATE_FILE_NAME = "state.json"
-DEFAULT_COMPACT_INTERVAL = 10
+DEFAULT_COMPACT_TOKEN_INTERVAL = 10000
+MAX_SHORT_LOG_TOKENS = 100000
 MAX_PAYLOAD_STRING_LENGTH = 16384
+
+def estimate_tokens(val):
+    if val is None: return 0
+    if isinstance(val, (int, float, bool)): return 1
+    if isinstance(val, str): return max(1, len(val) // 4) if val else 0
+    try:
+        s = json.dumps(val, ensure_ascii=False)
+        return max(1, len(s) // 4) if s else 0
+    except Exception:
+        return max(1, len(str(val)) // 4)
+
+def migrate_legacy_txt_files(mem_dir):
+    st = mem_dir / "short.txt"
+    sl = mem_dir / SHORT_LOG_NAME
+    if st.is_file():
+        if not sl.is_file():
+            try: st.rename(sl)
+            except Exception: pass
+        else:
+            try: st.unlink()
+            except Exception: pass
+    lt = mem_dir / "long.txt"
+    ll = mem_dir / "long.log"
+    if lt.is_file():
+        if not ll.is_file():
+            try: lt.rename(ll)
+            except Exception: pass
+        else:
+            try: lt.unlink()
+            except Exception: pass
+
+def prune_short_log(mem_dir, state, max_tokens=MAX_SHORT_LOG_TOKENS):
+    sl = mem_dir / SHORT_LOG_NAME
+    if not sl.is_file(): return
+    try:
+        if sl.stat().st_size < 350000 and state.get("short_log_tokens", 0) <= max_tokens:
+            return
+    except Exception: pass
+    try:
+        with open(sl, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception: return
+    if not lines: return
+    kept = []
+    tokens = 0
+    w_start = state.get("current_seq", 1)
+    for l in reversed(lines):
+        lc = l.strip()
+        if not lc: continue
+        lt = 0
+        r_seq = None
+        try:
+            r = json.loads(lc)
+            lt = int(r.get("tokens", 0)) or max(1, len(lc) // 4)
+            r_seq = r.get("seq")
+        except Exception:
+            lt = max(1, len(lc) // 4)
+        if tokens + lt > max_tokens and kept:
+            break
+        if r_seq: w_start = r_seq
+        kept.append(l)
+        tokens += lt
+    if len(kept) < len(lines):
+        kept.reverse()
+        tf = None
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(mem_dir), delete=False) as f:
+                tf = Path(f.name)
+                for l in kept:
+                    f.write(l if l.endswith("\\n") else l + "\\n")
+            tf.replace(sl)
+        finally:
+            if tf and tf.exists():
+                try: tf.unlink()
+                except Exception: pass
+    state["short_log_tokens"] = tokens
+    state["window_start_seq"] = w_start
 
 def truncate_string(val, max_len=MAX_PAYLOAD_STRING_LENGTH):
     if isinstance(val, str):
@@ -197,6 +304,7 @@ def main():
     root = Path(args.root).resolve() if args.root else find_project_root()
     mem_dir = root / MEMORY_DIR_NAME
     mem_dir.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_txt_files(mem_dir)
 
     state = load_state(mem_dir)
     seq = state.get("current_seq", 0) + 1
@@ -231,6 +339,9 @@ def main():
         payload = {"content": raw_payload.get("lastUserInput") or raw_payload.get("prompt") or raw_payload.get("text") or raw_in}
 
     payload, is_trunc = truncate_string(payload)
+    event_tokens = max(1, estimate_tokens(payload))
+    state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + event_tokens
+    state["short_log_tokens"] = state.get("short_log_tokens", 0) + event_tokens
 
     record = {
         "seq": seq,
@@ -240,18 +351,21 @@ def main():
         "turn_id": raw_payload.get("stepIdx") or raw_payload.get("invocationNum"),
         "type": event_type,
         "payload": payload,
+        "tokens": event_tokens,
         "truncated": is_trunc
     }
 
-    # Append to short.log
+    # Append to short.log and maintain rolling context window
     with open(mem_dir / SHORT_LOG_NAME, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\\n")
+    prune_short_log(mem_dir, state)
 
-    # Compaction check
-    last_compact = state.get("last_compacted_seq", 0)
-    compaction_due = (seq - last_compact) >= DEFAULT_COMPACT_INTERVAL
+    # Compaction check (10k tokens)
+    uncompacted = state["total_lifetime_tokens"] - state.get("last_compacted_tokens", 0)
+    compaction_due = uncompacted >= DEFAULT_COMPACT_TOKEN_INTERVAL
     notice = (
-        f"[MEMORY HOOK UPDATE NOTICE]: {seq - last_compact} actions elapsed since last long.log update. "
+        f"[MEMORY HOOK UPDATE NOTICE]: ~{uncompacted:,} tokens have accumulated since the "
+        f"last long-term memory update (Current Event: #{seq}). "
         f"Action Required: Review uncompacted entries in .memory/short.log and update .memory/long.log."
     )
 
@@ -262,6 +376,7 @@ def main():
         elif args.event in ["PreInvocation", "SessionStart"]:
             if compaction_due:
                 resp = {"injectSteps": [{"systemMessage": {"systemMessage": notice}}]}
+                state["last_compacted_tokens"] = state["total_lifetime_tokens"]
                 state["last_compacted_seq"] = seq
             else:
                 resp = {}
@@ -271,6 +386,7 @@ def main():
         if compaction_due:
             sys.stderr.write(f"\\n{notice}\\n")
             sys.stderr.flush()
+            state["last_compacted_tokens"] = state["total_lifetime_tokens"]
             state["last_compacted_seq"] = seq
         resp = {"status": "ok"}
 

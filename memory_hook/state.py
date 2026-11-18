@@ -7,7 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .constants import DEFAULT_COMPACT_INTERVAL, STATE_FILE_NAME
+from .constants import (
+    DEFAULT_COMPACT_INTERVAL,
+    DEFAULT_COMPACT_TOKEN_INTERVAL,
+    MAX_SHORT_LOG_TOKENS,
+    STATE_FILE_NAME,
+)
 
 
 class MemoryState:
@@ -23,6 +28,10 @@ class MemoryState:
             "last_updated_ts": None,
             "last_updated_provider": None,
             "total_events": 0,
+            "total_lifetime_tokens": 0,
+            "last_compacted_tokens": 0,
+            "short_log_tokens": 0,
+            "window_start_seq": 1,
         }
         self.load()
 
@@ -74,6 +83,32 @@ class MemoryState:
     def last_compacted_seq(self) -> int:
         return int(self.data.get("last_compacted_seq", 0))
 
+    @property
+    def total_lifetime_tokens(self) -> int:
+        return int(self.data.get("total_lifetime_tokens", 0))
+
+    @property
+    def last_compacted_tokens(self) -> int:
+        return int(self.data.get("last_compacted_tokens", 0))
+
+    @property
+    def short_log_tokens(self) -> int:
+        return int(self.data.get("short_log_tokens", 0))
+
+    @property
+    def window_start_seq(self) -> int:
+        return int(self.data.get("window_start_seq", 1))
+
+    @property
+    def uncompacted_tokens(self) -> int:
+        return max(0, self.total_lifetime_tokens - self.last_compacted_tokens)
+
+    def add_tokens(self, tokens: int) -> None:
+        """Adds tokens to total lifetime and short.log token counters."""
+        self.data["total_lifetime_tokens"] = self.total_lifetime_tokens + tokens
+        self.data["short_log_tokens"] = self.short_log_tokens + tokens
+        self.save()
+
     def next_seq(self, provider: Optional[str] = None) -> int:
         """Increments and returns the next sequence number."""
         self.data["current_seq"] = self.current_seq + 1
@@ -84,14 +119,26 @@ class MemoryState:
         self.save()
         return self.current_seq
 
-    def is_compaction_due(self, interval: int = DEFAULT_COMPACT_INTERVAL) -> bool:
-        """Checks if enough messages/events have accumulated since last compaction."""
-        return (self.current_seq - self.last_compacted_seq) >= interval
+    def is_compaction_due(
+        self,
+        token_interval: int = DEFAULT_COMPACT_TOKEN_INTERVAL,
+        event_interval: Optional[int] = None,
+    ) -> bool:
+        """Checks if enough tokens (default 10k) have accumulated since last compaction."""
+        if token_interval <= 100:  # Handled as event interval for backward-compat
+            return (self.current_seq - self.last_compacted_seq) >= token_interval
+
+        token_due = self.uncompacted_tokens >= token_interval
+        event_due = False
+        if event_interval is not None:
+            event_due = (self.current_seq - self.last_compacted_seq) >= event_interval
+        return token_due or event_due
 
     def mark_compacted(self, seq: Optional[int] = None) -> None:
-        """Marks the current or specified sequence number as compacted."""
+        """Marks compaction completed at current sequence and token level."""
         if seq is None:
             seq = self.current_seq
         self.data["last_compacted_seq"] = seq
+        self.data["last_compacted_tokens"] = self.total_lifetime_tokens
         self.data["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
         self.save()
