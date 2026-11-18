@@ -229,23 +229,20 @@ class MemoryState:
         last_line = ""
         tokens_sum = 0
         event_count = 0
-        try:
-            with open(self.short_log_file, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line_clean = line.strip()
-                    if line_clean:
-                        last_line = line_clean
-                        event_count += 1
-                        try:
-                            rec = json.loads(line_clean)
-                            if isinstance(rec, dict):
-                                tok = rec.get("tokens", 0)
-                                if isinstance(tok, int):
-                                    tokens_sum += tok
-                        except Exception:
-                            pass
-        except OSError:
-            return False
+        with open(self.short_log_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line_clean = line.strip()
+                if line_clean:
+                    last_line = line_clean
+                    event_count += 1
+                    try:
+                        rec = json.loads(line_clean)
+                        if isinstance(rec, dict):
+                            tok = rec.get("tokens", 0)
+                            if isinstance(tok, int):
+                                tokens_sum += tok
+                    except Exception:
+                        pass
 
         if not last_line:
             if self.current_seq != 0:

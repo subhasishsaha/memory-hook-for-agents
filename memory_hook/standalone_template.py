@@ -157,8 +157,6 @@ def safe_fsync_dir(dir_path):
             getattr(errno, "EINVAL", 22),
             getattr(errno, "ENOTSUP", 45),
             getattr(errno, "EOPNOTSUPP", 45),
-            getattr(errno, "EPERM", 1),
-            getattr(errno, "EACCES", 13),
         }
         if e.errno in unsupported:
             return
@@ -341,22 +339,19 @@ def reconcile_with_journal(mem_dir, state):
     last_line = ""
     tokens_sum = 0
     event_count = 0
-    try:
-        with open(sl, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line_clean = line.strip()
-                if line_clean:
-                    last_line = line_clean
-                    event_count += 1
-                    try:
-                        rec = json.loads(line_clean)
-                        if isinstance(rec, dict):
-                            tok = rec.get("tokens", 0)
-                            if isinstance(tok, int):
-                                tokens_sum += tok
-                    except Exception: pass
-    except OSError:
-        return False
+    with open(sl, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line_clean = line.strip()
+            if line_clean:
+                last_line = line_clean
+                event_count += 1
+                try:
+                    rec = json.loads(line_clean)
+                    if isinstance(rec, dict):
+                        tok = rec.get("tokens", 0)
+                        if isinstance(tok, int):
+                            tokens_sum += tok
+                except Exception: pass
 
     if not last_line:
         if state.get("current_seq", 0) != 0:

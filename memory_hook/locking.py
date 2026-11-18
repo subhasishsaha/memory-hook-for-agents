@@ -53,8 +53,6 @@ def safe_fsync_dir(dir_path: Path) -> None:
             getattr(errno, "EINVAL", 22),
             getattr(errno, "ENOTSUP", 45),
             getattr(errno, "EOPNOTSUPP", 45),
-            getattr(errno, "EPERM", 1),
-            getattr(errno, "EACCES", 13),
         }
         if e.errno in unsupported_codes:
             return

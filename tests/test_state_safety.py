@@ -408,6 +408,61 @@ class TestStateSafety(unittest.TestCase):
             with self.assertRaises(OSError):
                 state.reconcile_with_journal()
 
+    def test_journal_read_failure_propagates_oserror_preventing_duplicate_sequences(self):
+        """Journal read failures during reconciliation propagate OSError instead of returning False."""
+        import errno
+        from memory_hook.standalone_template import STANDALONE_RUNNER_CODE
+
+        # Write an event at seq 51 into short.log
+        record = {"seq": 51, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 100}
+        self.short_log.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        state = MemoryState(self.mem_dir)
+        state.data["current_seq"] = 50  # Stale state prior to crash
+        state.save()
+
+        # 1. Package reconcile_with_journal must propagate OSError on read failure
+        with patch("builtins.open", side_effect=OSError(getattr(errno, "EIO", 5), "Physical disk error")):
+            with self.assertRaises(OSError):
+                state.reconcile_with_journal()
+
+        # 2. Standalone runner must also propagate OSError
+        runner_scope = {}
+        exec(STANDALONE_RUNNER_CODE, runner_scope)
+        std_reconcile = runner_scope["reconcile_with_journal"]
+        std_load_state = runner_scope["load_state"]
+
+        std_state = std_load_state(self.mem_dir)
+        with patch("builtins.open", side_effect=OSError(getattr(errno, "EIO", 5), "Physical disk error")):
+            with self.assertRaises(OSError):
+                std_reconcile(self.mem_dir, std_state)
+
+    def test_safe_fsync_dir_propagates_permission_errors_and_tolerates_unsupported_errno(self):
+        """safe_fsync_dir propagates EACCES/EPERM and ignores only unsupported errnos."""
+        import errno
+        from memory_hook.locking import safe_fsync_dir
+
+        # Simulate POSIX platform
+        with patch("sys.platform", "linux"):
+            # 1. EACCES on os.open must propagate
+            with patch("os.open", side_effect=OSError(getattr(errno, "EACCES", 13), "Permission denied")):
+                with self.assertRaises(OSError) as ctx:
+                    safe_fsync_dir(self.mem_dir)
+                self.assertEqual(ctx.exception.errno, getattr(errno, "EACCES", 13))
+
+            # 2. EPERM on os.open must propagate
+            with patch("os.open", side_effect=OSError(getattr(errno, "EPERM", 1), "Operation not permitted")):
+                with self.assertRaises(OSError) as ctx:
+                    safe_fsync_dir(self.mem_dir)
+                self.assertEqual(ctx.exception.errno, getattr(errno, "EPERM", 1))
+
+            # 3. Unsupported errno (e.g. EINVAL on directory fsync) must be ignored
+            with patch("os.open", return_value=123):
+                with patch("os.close"):
+                    with patch("memory_hook.locking.safe_fsync", side_effect=OSError(getattr(errno, "EINVAL", 22), "Invalid argument")):
+                        # Should not raise
+                        safe_fsync_dir(self.mem_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
