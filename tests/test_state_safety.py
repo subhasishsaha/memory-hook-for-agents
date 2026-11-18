@@ -463,6 +463,128 @@ class TestStateSafety(unittest.TestCase):
                         # Should not raise
                         safe_fsync_dir(self.mem_dir)
 
+    def test_incomplete_truncated_final_journal_record_tail_recovery_package_and_standalone(self):
+        """Truncated final JSON line from interrupted append is safely recovered without duplicate sequences."""
+        from memory_hook.standalone_template import STANDALONE_RUNNER_CODE
+
+        records = [
+            {"seq": i, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 10}
+            for i in range(1, 51)
+        ]
+        clean_content = "\n".join(json.dumps(r) for r in records) + "\n"
+        # Simulate interrupted append of sequence 51
+        truncated_tail = '{"seq": 51, "ts": "2026-11-18T00:00:00Z", "provider": "antigrav'
+
+        # 1. Test Package MemoryState tail recovery
+        self.short_log.write_text(clean_content + truncated_tail, encoding="utf-8")
+        state = MemoryState(self.mem_dir)
+        state.data["current_seq"] = 50
+        state.data["short_log_tokens"] = 500
+        state.data["total_lifetime_tokens"] = 500
+        state.save()
+
+        changed = state.reconcile_with_journal()
+        self.assertTrue(changed)
+        self.assertEqual(state.current_seq, 50)
+        # Verify physical short.log was repaired and ends cleanly with event 50
+        lines = self.short_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 50)
+        last_rec = json.loads(lines[-1])
+        self.assertEqual(last_rec["seq"], 50)
+
+        # 2. Test Standalone runner tail recovery
+        self.short_log.write_text(clean_content + truncated_tail, encoding="utf-8")
+        runner_scope = {}
+        exec(STANDALONE_RUNNER_CODE, runner_scope)
+        std_reconcile = runner_scope["reconcile_with_journal"]
+        std_load_state = runner_scope["load_state"]
+
+        std_state = std_load_state(self.mem_dir)
+        std_state["current_seq"] = 50
+        std_state["short_log_tokens"] = 500
+        std_state["total_lifetime_tokens"] = 500
+        std_changed = std_reconcile(self.mem_dir, std_state)
+        self.assertTrue(std_changed)
+        self.assertEqual(std_state["current_seq"], 50)
+        std_lines = self.short_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(std_lines), 50)
+
+    def test_malformed_final_record_tail_recovery_package_and_standalone(self):
+        """Malformed garbage final line is safely recovered back to the last valid record."""
+        from memory_hook.standalone_template import STANDALONE_RUNNER_CODE
+
+        records = [
+            {"seq": i, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 10}
+            for i in range(1, 21)
+        ]
+        clean_content = "\n".join(json.dumps(r) for r in records) + "\n"
+        corrupted_tail = "CORRUPTED_NON_JSON_LINE\n"
+
+        # 1. Package runner
+        self.short_log.write_text(clean_content + corrupted_tail, encoding="utf-8")
+        state = MemoryState(self.mem_dir)
+        state.data["current_seq"] = 20
+        state.save()
+
+        changed = state.reconcile_with_journal()
+        self.assertTrue(changed)
+        self.assertEqual(state.current_seq, 20)
+        lines = self.short_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 20)
+
+        # 2. Standalone runner
+        self.short_log.write_text(clean_content + corrupted_tail, encoding="utf-8")
+        runner_scope = {}
+        exec(STANDALONE_RUNNER_CODE, runner_scope)
+        std_reconcile = runner_scope["reconcile_with_journal"]
+        std_load_state = runner_scope["load_state"]
+
+        std_state = std_load_state(self.mem_dir)
+        std_state["current_seq"] = 20
+        std_changed = std_reconcile(self.mem_dir, std_state)
+        self.assertTrue(std_changed)
+        self.assertEqual(std_state["current_seq"], 20)
+        std_lines = self.short_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(std_lines), 20)
+
+    def test_unexpected_missing_or_empty_journal_with_nonzero_sequence_fails_closed(self):
+        """Unexpected missing or empty journal when state has nonzero sequence raises error to prevent history loss."""
+        from memory_hook.standalone_template import STANDALONE_RUNNER_CODE
+
+        runner_scope = {}
+        exec(STANDALONE_RUNNER_CODE, runner_scope)
+        std_reconcile = runner_scope["reconcile_with_journal"]
+        std_load_state = runner_scope["load_state"]
+
+        # Ensure short.log is absent
+        if self.short_log.exists():
+            self.short_log.unlink()
+
+        # 1. Clean startup (current_seq == 0) returns False without error
+        state0 = MemoryState(self.mem_dir)
+        self.assertFalse(state0.reconcile_with_journal())
+        std_state0 = std_load_state(self.mem_dir)
+        self.assertFalse(std_reconcile(self.mem_dir, std_state0))
+
+        # 2. Nonzero sequence with missing journal must raise FileNotFoundError
+        state50 = MemoryState(self.mem_dir)
+        state50.data["current_seq"] = 50
+        state50.save()
+        with self.assertRaises(FileNotFoundError):
+            state50.reconcile_with_journal()
+
+        std_state50 = std_load_state(self.mem_dir)
+        with self.assertRaises(FileNotFoundError):
+            std_reconcile(self.mem_dir, std_state50)
+
+        # 3. Nonzero sequence with empty 0-byte journal must raise ValueError
+        self.short_log.write_text("", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            state50.reconcile_with_journal()
+
+        with self.assertRaises(ValueError):
+            std_reconcile(self.mem_dir, std_state50)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -218,52 +218,98 @@ class MemoryState:
         Treats short.log as the append-only source of truth. If a crash occurred:
         - Crash before journal append: resets current_seq to last committed journal sequence.
         - Crash after journal append: updates current_seq, total_events, and reconciles token counts.
+        - Crash during journal append: performs safe tail recovery by truncating uncommitted malformed tail.
+        - Missing or unexpectedly empty journal when current_seq > 0 raises an error to prevent silent history loss.
         """
         if not self.short_log_file.is_file():
             if self.current_seq != 0:
-                self.data["current_seq"] = 0
-                self.save()
-                return True
+                raise FileNotFoundError(
+                    f"Journal {SHORT_LOG_NAME} is missing from {self.memory_dir} "
+                    f"but state records sequence #{self.current_seq}. Refusing to reset to fresh state."
+                )
             return False
 
-        last_line = ""
-        tokens_sum = 0
-        event_count = 0
         with open(self.short_log_file, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line_clean = line.strip()
-                if line_clean:
-                    last_line = line_clean
-                    event_count += 1
-                    try:
-                        rec = json.loads(line_clean)
-                        if isinstance(rec, dict):
-                            tok = rec.get("tokens", 0)
-                            if isinstance(tok, int):
-                                tokens_sum += tok
-                    except Exception:
-                        pass
+            lines = f.readlines()
 
-        if not last_line:
+        cleaned_lines = [l for l in lines if l.strip()]
+
+        if not cleaned_lines:
             if self.current_seq != 0:
-                self.data["current_seq"] = 0
-                self.save()
-                return True
+                raise ValueError(
+                    f"Journal {SHORT_LOG_NAME} in {self.memory_dir} is unexpectedly empty "
+                    f"but state records sequence #{self.current_seq}. Refusing to reset to fresh state."
+                )
             return False
 
-        try:
-            record = json.loads(last_line)
-        except Exception:
-            return False
-        if not isinstance(record, dict):
+        valid_lines = []
+        tokens_sum = 0
+        last_valid_record = None
+        corrupt_tail = False
+        ends_with_newline = bool(lines and lines[-1].endswith("\n"))
+
+        for idx, line in enumerate(cleaned_lines):
+            line_clean = line.strip()
+            is_final = (idx == len(cleaned_lines) - 1)
+            try:
+                rec = json.loads(line_clean)
+                if isinstance(rec, dict):
+                    valid_lines.append(line_clean + "\n")
+                    last_valid_record = rec
+                    tok = rec.get("tokens", 0)
+                    if isinstance(tok, int):
+                        tokens_sum += tok
+                else:
+                    if is_final:
+                        corrupt_tail = True
+            except Exception:
+                if is_final:
+                    corrupt_tail = True
+
+        # Handle corrupt/incomplete final record resulting from interrupted append
+        if corrupt_tail:
+            if not valid_lines:
+                if self.current_seq > 1:
+                    raise ValueError(
+                        f"Journal {SHORT_LOG_NAME} contains only a malformed record "
+                        f"but state records sequence #{self.current_seq}."
+                    )
+                with open(self.short_log_file, "w", encoding="utf-8") as f:
+                    f.write("")
+                    f.flush()
+                    safe_fsync(f.fileno())
+                safe_fsync_dir(self.memory_dir)
+                if self.current_seq != 0:
+                    self.data["current_seq"] = 0
+                    self.save()
+                    return True
+                return False
+
+            # Safe tail-recovery: truncate journal back to the last valid line
+            with open(self.short_log_file, "w", encoding="utf-8") as f:
+                f.writelines(valid_lines)
+                f.flush()
+                safe_fsync(f.fileno())
+            safe_fsync_dir(self.memory_dir)
+            ends_with_newline = True
+
+        elif not ends_with_newline and valid_lines:
+            with open(self.short_log_file, "w", encoding="utf-8") as f:
+                f.writelines(valid_lines)
+                f.flush()
+                safe_fsync(f.fileno())
+            safe_fsync_dir(self.memory_dir)
+
+        if not last_valid_record:
             return False
 
+        record = last_valid_record
         journal_seq = record.get("seq")
         changed = False
         if isinstance(journal_seq, int):
             if journal_seq != self.current_seq:
                 self.data["current_seq"] = journal_seq
-                self.data["total_events"] = max(event_count, journal_seq)
+                self.data["total_events"] = max(len(valid_lines), journal_seq)
                 changed = True
 
         # If journal has more tokens than recorded in short_log_tokens (crash before state save)
@@ -281,8 +327,10 @@ class MemoryState:
             self.data["last_updated_provider"] = str(record["provider"])
             changed = True
 
-        if changed:
+        if changed or corrupt_tail:
             self.save()
+            return True
+
         return changed
 
     def save(self) -> None:

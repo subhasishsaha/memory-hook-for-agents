@@ -330,46 +330,92 @@ def tokens_at_seq(mem_dir, state, target_seq):
 
 def reconcile_with_journal(mem_dir, state):
     sl = mem_dir / SHORT_LOG_NAME
+    current_seq = state.get("current_seq", 0)
     if not sl.is_file():
-        if state.get("current_seq", 0) != 0:
-            state["current_seq"] = 0
-            save_state(mem_dir, state)
-            return True
+        if current_seq != 0:
+            raise FileNotFoundError(
+                f"Journal {SHORT_LOG_NAME} is missing from {mem_dir} "
+                f"but state records sequence #{current_seq}. Refusing to reset to fresh state."
+            )
         return False
-    last_line = ""
-    tokens_sum = 0
-    event_count = 0
-    with open(sl, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line_clean = line.strip()
-            if line_clean:
-                last_line = line_clean
-                event_count += 1
-                try:
-                    rec = json.loads(line_clean)
-                    if isinstance(rec, dict):
-                        tok = rec.get("tokens", 0)
-                        if isinstance(tok, int):
-                            tokens_sum += tok
-                except Exception: pass
 
-    if not last_line:
-        if state.get("current_seq", 0) != 0:
-            state["current_seq"] = 0
-            save_state(mem_dir, state)
-            return True
+    with open(sl, "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+
+    cleaned_lines = [l for l in lines if l.strip()]
+    if not cleaned_lines:
+        if current_seq != 0:
+            raise ValueError(
+                f"Journal {SHORT_LOG_NAME} in {mem_dir} is unexpectedly empty "
+                f"but state records sequence #{current_seq}. Refusing to reset to fresh state."
+            )
         return False
-    try:
-        record = json.loads(last_line)
-    except Exception:
+
+    valid_lines = []
+    tokens_sum = 0
+    last_valid_record = None
+    corrupt_tail = False
+    ends_with_newline = bool(lines and lines[-1].endswith("\n"))
+
+    for idx, line in enumerate(cleaned_lines):
+        line_clean = line.strip()
+        is_final = (idx == len(cleaned_lines) - 1)
+        try:
+            rec = json.loads(line_clean)
+            if isinstance(rec, dict):
+                valid_lines.append(line_clean + "\n")
+                last_valid_record = rec
+                tok = rec.get("tokens", 0)
+                if isinstance(tok, int):
+                    tokens_sum += tok
+            else:
+                if is_final:
+                    corrupt_tail = True
+        except Exception:
+            if is_final:
+                corrupt_tail = True
+
+    if corrupt_tail:
+        if not valid_lines:
+            if current_seq > 1:
+                raise ValueError(
+                    f"Journal {SHORT_LOG_NAME} contains only a malformed record "
+                    f"but state records sequence #{current_seq}."
+                )
+            with open(sl, "w", encoding="utf-8") as f:
+                f.write("")
+                f.flush()
+                safe_fsync(f.fileno())
+            safe_fsync_dir(mem_dir)
+            if current_seq != 0:
+                state["current_seq"] = 0
+                save_state(mem_dir, state)
+                return True
+            return False
+
+        with open(sl, "w", encoding="utf-8") as f:
+            f.writelines(valid_lines)
+            f.flush()
+            safe_fsync(f.fileno())
+        safe_fsync_dir(mem_dir)
+        ends_with_newline = True
+
+    elif not ends_with_newline and valid_lines:
+        with open(sl, "w", encoding="utf-8") as f:
+            f.writelines(valid_lines)
+            f.flush()
+            safe_fsync(f.fileno())
+        safe_fsync_dir(mem_dir)
+
+    if not last_valid_record:
         return False
-    if not isinstance(record, dict):
-        return False
+
+    record = last_valid_record
     journal_seq = record.get("seq")
     changed = False
     if isinstance(journal_seq, int) and journal_seq != state.get("current_seq", 0):
         state["current_seq"] = journal_seq
-        state["total_events"] = max(event_count, journal_seq)
+        state["total_events"] = max(len(valid_lines), journal_seq)
         changed = True
     if tokens_sum > state.get("short_log_tokens", 0):
         missing = tokens_sum - state.get("short_log_tokens", 0)
@@ -382,8 +428,9 @@ def reconcile_with_journal(mem_dir, state):
     if record.get("provider") and not state.get("last_updated_provider"):
         state["last_updated_provider"] = str(record["provider"])
         changed = True
-    if changed:
+    if changed or corrupt_tail:
         save_state(mem_dir, state)
+        return True
     return changed
 
 def check_long_log_sync(mem_dir, state):
