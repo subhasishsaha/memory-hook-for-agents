@@ -221,15 +221,16 @@ def run_hook(
         long_log_path = memory_dir / LONG_LOG_NAME
         state.check_long_log_sync(long_log_path)
 
-        seq = state.next_seq(provider=provider)
+        # Determine sequence strictly from current reconciled state
+        seq = state.current_seq + 1
         event["seq"] = seq
         event_tokens = int(event.get("tokens", 1))
 
-        # Write-ahead: Append to short.log first
+        # Write-ahead: Append and fsync to short.log first
         append_to_short_log(memory_dir, event)
 
-        # Update token accounting and apply rolling context prune
-        state.add_tokens(event_tokens)
+        # Atomically commit event to state and apply rolling context prune
+        state.commit_event(seq=seq, tokens=event_tokens, provider=provider)
         prune_short_log(memory_dir, state)
 
         # Check compaction condition (10k tokens)

@@ -27,7 +27,7 @@ Developers frequently switch between different AI agents:
 
 - **Cross-Provider Compatibility**: Native support for **Antigravity** (`.agents/hooks.json`), **Claude Code** (`.claude/settings.json`), **OpenAI Codex** (`.codex/hooks.json`), and **Cursor** (`.cursor/hooks.json`).
 - **Cross-Process File Locking**: Concurrency-safe write transactions using standard library locks (`msvcrt` on Windows, `fcntl` on Unix) to prevent race conditions during parallel hook invocations.
-- **Deterministic Event Stream (`.memory/short.log`)**: Records actions, tool parameters, tool results, and model responses in append-only JSON Lines format.
+- **Deterministic Event Stream (`.memory/short.log`)**: Records actions, tool parameters, tool results, and model responses in a rolling JSONL event journal.
 - **100k Token Rolling Context Window**: Automatically prunes older entries from `.memory/short.log` to preserve a rolling 100,000 token context window, preventing file bloat and runaway context while protecting uncompacted events.
 - **Automatic Secret & Credential Redaction**: Pattern-based masking redacts OpenAI/Anthropic/Google/AWS/GitHub API keys, tokens, bearer headers, private keys, passwords, and `.env` files into `[REDACTED:...]` markers before writing to disk.
 - **Compaction Acknowledgement Protocol**: Compaction requests remain `pending` until long-term memory synthesis is verified in `.memory/long.log` or explicitly acknowledged. Pending compactions are never prematurely marked as completed and automatically retry across sessions.

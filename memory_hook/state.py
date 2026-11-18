@@ -166,23 +166,83 @@ class MemoryState:
         except Exception:
             return False
 
+    def tokens_at_seq(self, target_seq: int) -> int:
+        """Calculates cumulative lifetime tokens represented through a given sequence."""
+        if target_seq >= self.current_seq:
+            return self.total_lifetime_tokens
+
+        # Check if there's a pending compaction recorded at this exact sequence
+        pc = self.pending_compaction
+        if pc and isinstance(pc, dict) and pc.get("requested_at_seq") == target_seq:
+            if "lifetime_tokens_at_request" in pc:
+                return int(pc["lifetime_tokens_at_request"])
+
+        if not self.short_log_file.is_file():
+            return 0
+
+        # Sum tokens from short.log
+        tokens_sum = 0
+        baseline = 0
+        if self.window_start_seq > 1:
+            baseline = max(0, self.total_lifetime_tokens - self.short_log_tokens)
+
+        try:
+            with open(self.short_log_file, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line_clean = line.strip()
+                    if not line_clean:
+                        continue
+                    try:
+                        record = json.loads(line_clean)
+                        r_seq = record.get("seq")
+                        if isinstance(r_seq, int) and r_seq <= target_seq:
+                            tok = record.get("tokens", 0)
+                            if isinstance(tok, int):
+                                tokens_sum += tok
+                    except Exception:
+                        continue
+            return baseline + tokens_sum
+        except Exception:
+            return self.total_lifetime_tokens
+
     def reconcile_with_journal(self) -> bool:
         """Reconciles sequence number and state with short.log journal.
 
-        Treats short.log as the append-only source of truth. If a crash or mismatch
-        occurred between sequence allocation and state persistence, aligns current_seq
-        with the last committed journal entry.
+        Treats short.log as the append-only source of truth. If a crash occurred:
+        - Crash before journal append: resets current_seq to last committed journal sequence.
+        - Crash after journal append: updates current_seq, total_events, and reconciles token counts.
         """
         if not self.short_log_file.is_file():
+            if self.current_seq != 0:
+                self.data["current_seq"] = 0
+                self.save()
+                return True
             return False
 
         try:
             last_line = ""
+            tokens_sum = 0
+            event_count = 0
             with open(self.short_log_file, "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
-                    if line.strip():
-                        last_line = line.strip()
+                    line_clean = line.strip()
+                    if line_clean:
+                        last_line = line_clean
+                        event_count += 1
+                        try:
+                            rec = json.loads(line_clean)
+                            if isinstance(rec, dict):
+                                tok = rec.get("tokens", 0)
+                                if isinstance(tok, int):
+                                    tokens_sum += tok
+                        except Exception:
+                            pass
+
             if not last_line:
+                if self.current_seq != 0:
+                    self.data["current_seq"] = 0
+                    self.save()
+                    return True
                 return False
 
             record = json.loads(last_line)
@@ -194,8 +254,15 @@ class MemoryState:
             if isinstance(journal_seq, int):
                 if journal_seq != self.current_seq:
                     self.data["current_seq"] = journal_seq
-                    self.data["total_events"] = max(int(self.data.get("total_events", 0)), journal_seq)
+                    self.data["total_events"] = max(event_count, journal_seq)
                     changed = True
+
+            # If journal has more tokens than recorded in short_log_tokens (crash before state save)
+            if tokens_sum > self.short_log_tokens:
+                missing_tokens = tokens_sum - self.short_log_tokens
+                self.data["short_log_tokens"] = tokens_sum
+                self.data["total_lifetime_tokens"] = self.total_lifetime_tokens + missing_tokens
+                changed = True
 
             if record.get("ts") and not self.data.get("last_updated_ts"):
                 self.data["last_updated_ts"] = str(record["ts"])
@@ -296,6 +363,7 @@ class MemoryState:
             "status": "pending",
             "requested_at_seq": seq,
             "requested_tokens": uncompacted_tokens,
+            "lifetime_tokens_at_request": self.tokens_at_seq(seq),
             "requested_at": now_iso,
         }
         self.data["pending_compaction"] = pending_record
@@ -344,7 +412,7 @@ class MemoryState:
             return False
 
         self.data["last_compacted_seq"] = target_seq
-        self.data["last_compacted_tokens"] = self.total_lifetime_tokens
+        self.data["last_compacted_tokens"] = self.tokens_at_seq(target_seq)
         self.data["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
         self.data["pending_compaction"] = None
         self.save()
@@ -381,12 +449,23 @@ class MemoryState:
             if match:
                 synced_seq = int(match.group(1))
                 if synced_seq >= requested_seq:
-                    self.acknowledge_compaction(synced_seq)
+                    self.acknowledge_compaction(synced_seq, force=True)
                     return True
         except Exception:
             pass
 
         return False
+
+    def commit_event(self, seq: int, tokens: int, provider: Optional[str] = None) -> None:
+        """Atomically commits an event to state after it has been written and fsynced to short.log."""
+        self.data["current_seq"] = seq
+        self.data["total_events"] = max(int(self.data.get("total_events", 0)), seq)
+        self.data["total_lifetime_tokens"] = self.total_lifetime_tokens + tokens
+        self.data["short_log_tokens"] = self.short_log_tokens + tokens
+        self.data["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
+        if provider:
+            self.data["last_updated_provider"] = provider
+        self.save()
 
     def add_tokens(self, tokens: int) -> None:
         """Adds tokens to total lifetime and short.log token counters."""

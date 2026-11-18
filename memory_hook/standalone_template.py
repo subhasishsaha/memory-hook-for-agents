@@ -145,6 +145,73 @@ def find_project_root():
             return p
     return curr
 
+def recover_from_short_log(mem_dir, state):
+    sl = mem_dir / SHORT_LOG_NAME
+    if not sl.is_file():
+        return False
+    max_seq = 0
+    min_seq = None
+    event_count = 0
+    tokens_sum = 0
+    last_ts = None
+    last_provider = None
+    try:
+        with open(sl, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line_clean = line.strip()
+                if not line_clean:
+                    continue
+                try:
+                    record = json.loads(line_clean)
+                    if not isinstance(record, dict):
+                        continue
+                    seq = record.get("seq")
+                    if isinstance(seq, int):
+                        if seq > max_seq:
+                            max_seq = seq
+                        if min_seq is None or seq < min_seq:
+                            min_seq = seq
+                    event_count += 1
+                    tok = record.get("tokens", 0)
+                    if isinstance(tok, int):
+                        tokens_sum += tok
+                    if record.get("ts"):
+                        last_ts = str(record["ts"])
+                    if record.get("provider"):
+                        last_provider = str(record["provider"])
+                except Exception:
+                    continue
+        state["current_seq"] = max_seq
+        state["window_start_seq"] = min_seq if min_seq is not None else 1
+        state["short_log_tokens"] = tokens_sum
+        state["total_events"] = max(state.get("total_events", 0), event_count)
+        if min_seq is not None and min_seq <= 1:
+            state["total_lifetime_tokens"] = tokens_sum
+        else:
+            state["total_lifetime_tokens"] = max(state.get("total_lifetime_tokens", 0), tokens_sum)
+        state["recovered_at_ts"] = datetime.now(timezone.utc).isoformat()
+        if last_ts:
+            state["last_updated_ts"] = last_ts
+        if last_provider:
+            state["last_updated_provider"] = last_provider
+        return True
+    except Exception:
+        return False
+
+def handle_corrupt_state(mem_dir, default_state):
+    sf = mem_dir / STATE_FILE_NAME
+    now_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_path = mem_dir / f"{STATE_FILE_NAME}.corrupt.{now_ts}"
+    try:
+        if sf.is_file():
+            import shutil
+            shutil.copy2(sf, backup_path)
+    except Exception:
+        pass
+    recover_from_short_log(mem_dir, default_state)
+    save_state(mem_dir, default_state)
+    return default_state
+
 def load_state(mem_dir):
     sf = mem_dir / STATE_FILE_NAME
     default_state = {
@@ -153,14 +220,23 @@ def load_state(mem_dir):
         "short_log_tokens": 0, "window_start_seq": 1, "pending_compaction": None
     }
     if sf.is_file():
+        is_corrupt = False
         try:
             with open(sf, "r", encoding="utf-8") as f:
-                d = json.load(f)
-                if isinstance(d, dict):
-                    default_state.update(d)
-                    return default_state
+                content = f.read().strip()
+                if not content:
+                    is_corrupt = True
+                else:
+                    d = json.load(f)
+                    if isinstance(d, dict):
+                        default_state.update(d)
+                        return default_state
+                    else:
+                        is_corrupt = True
         except Exception:
-            pass
+            is_corrupt = True
+        if is_corrupt:
+            return handle_corrupt_state(mem_dir, default_state)
     return default_state
 
 def save_state(mem_dir, state):
@@ -181,21 +257,96 @@ def save_state(mem_dir, state):
             try: tf.unlink()
             except Exception: pass
 
-def reconcile_with_journal(mem_dir, state):
+def tokens_at_seq(mem_dir, state, target_seq):
+    if target_seq >= state.get("current_seq", 0):
+        return state.get("total_lifetime_tokens", 0)
+    pc = state.get("pending_compaction")
+    if pc and isinstance(pc, dict) and pc.get("requested_at_seq") == target_seq:
+        if "lifetime_tokens_at_request" in pc:
+            return int(pc["lifetime_tokens_at_request"])
     sl = mem_dir / SHORT_LOG_NAME
-    if not sl.is_file(): return
+    if not sl.is_file():
+        return 0
+    tokens_sum = 0
+    baseline = 0
+    if state.get("window_start_seq", 1) > 1:
+        baseline = max(0, state.get("total_lifetime_tokens", 0) - state.get("short_log_tokens", 0))
     try:
-        last_line = ""
         with open(sl, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
-                if line.strip(): last_line = line.strip()
-        if last_line:
-            rec = json.loads(last_line)
-            j_seq = rec.get("seq")
-            if isinstance(j_seq, int) and j_seq != state.get("current_seq", 0):
-                state["current_seq"] = j_seq
-                state["total_events"] = max(state.get("total_events", 0), j_seq)
-    except Exception: pass
+                line_clean = line.strip()
+                if not line_clean:
+                    continue
+                try:
+                    record = json.loads(line_clean)
+                    r_seq = record.get("seq")
+                    if isinstance(r_seq, int) and r_seq <= target_seq:
+                        tok = record.get("tokens", 0)
+                        if isinstance(tok, int):
+                            tokens_sum += tok
+                except Exception:
+                    continue
+        return baseline + tokens_sum
+    except Exception:
+        return state.get("total_lifetime_tokens", 0)
+
+def reconcile_with_journal(mem_dir, state):
+    sl = mem_dir / SHORT_LOG_NAME
+    if not sl.is_file():
+        if state.get("current_seq", 0) != 0:
+            state["current_seq"] = 0
+            save_state(mem_dir, state)
+            return True
+        return False
+    try:
+        last_line = ""
+        tokens_sum = 0
+        event_count = 0
+        with open(sl, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line_clean = line.strip()
+                if line_clean:
+                    last_line = line_clean
+                    event_count += 1
+                    try:
+                        rec = json.loads(line_clean)
+                        if isinstance(rec, dict):
+                            tok = rec.get("tokens", 0)
+                            if isinstance(tok, int):
+                                tokens_sum += tok
+                    except Exception:
+                        pass
+        if not last_line:
+            if state.get("current_seq", 0) != 0:
+                state["current_seq"] = 0
+                save_state(mem_dir, state)
+                return True
+            return False
+        record = json.loads(last_line)
+        if not isinstance(record, dict):
+            return False
+        journal_seq = record.get("seq")
+        changed = False
+        if isinstance(journal_seq, int) and journal_seq != state.get("current_seq", 0):
+            state["current_seq"] = journal_seq
+            state["total_events"] = max(event_count, journal_seq)
+            changed = True
+        if tokens_sum > state.get("short_log_tokens", 0):
+            missing = tokens_sum - state.get("short_log_tokens", 0)
+            state["short_log_tokens"] = tokens_sum
+            state["total_lifetime_tokens"] = state.get("total_lifetime_tokens", 0) + missing
+            changed = True
+        if record.get("ts") and not state.get("last_updated_ts"):
+            state["last_updated_ts"] = str(record["ts"])
+            changed = True
+        if record.get("provider") and not state.get("last_updated_provider"):
+            state["last_updated_provider"] = str(record["provider"])
+            changed = True
+        if changed:
+            save_state(mem_dir, state)
+        return changed
+    except Exception:
+        return False
 
 def check_long_log_sync(mem_dir, state):
     pc = state.get("pending_compaction")
@@ -212,9 +363,12 @@ def check_long_log_sync(mem_dir, state):
         if match:
             synced_seq = int(match.group(1))
             if synced_seq >= requested_seq:
-                state["last_compacted_seq"] = synced_seq
-                state["last_compacted_tokens"] = state.get("total_lifetime_tokens", 0)
+                target_seq = min(synced_seq, state.get("current_seq", 0))
+                state["last_compacted_seq"] = target_seq
+                state["last_compacted_tokens"] = tokens_at_seq(mem_dir, state, target_seq)
                 state["pending_compaction"] = None
+                state["last_updated_ts"] = datetime.now(timezone.utc).isoformat()
+                save_state(mem_dir, state)
                 return True
     except Exception: pass
     return False
@@ -397,6 +551,7 @@ def main():
                     "status": "pending",
                     "requested_at_seq": seq,
                     "requested_tokens": uncompacted,
+                    "lifetime_tokens_at_request": tokens_at_seq(mem_dir, state, seq),
                     "requested_at": datetime.now(timezone.utc).isoformat()
                 }
 

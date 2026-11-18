@@ -110,6 +110,59 @@ class TestPruningRegression(unittest.TestCase):
         last_event = json.loads(lines[-1])
         self.assertEqual(last_event["seq"], 20)
 
+    def test_standalone_runner_subprocess_execution_and_corrupt_recovery(self):
+        """Executes the standalone runner code via subprocess to verify parity in deployed environment."""
+        import subprocess
+        import sys
+
+        bin_dir = self.mem_dir / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        runner_py = bin_dir / "test_standalone_runner.py"
+        runner_py.write_text(STANDALONE_RUNNER_CODE, encoding="utf-8")
+
+        # 1. Feed events through standalone runner to trigger pending compaction
+        for i in range(5):
+            payload = json.dumps({
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "X" * 10000}},
+                "stepIdx": i
+            })
+            proc = subprocess.run(
+                [sys.executable, str(runner_py), "--provider", "antigravity", "--event", "PreToolUse", "--root", str(self.root)],
+                input=payload,
+                text=True,
+                capture_output=True,
+                check=True
+            )
+            self.assertEqual(proc.returncode, 0)
+
+        # Verify state.json was created and pending compaction triggered
+        state_file = self.mem_dir / "state.json"
+        self.assertTrue(state_file.is_file())
+        state_data = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(state_data["current_seq"], 5)
+        self.assertIsNotNone(state_data.get("pending_compaction"))
+        self.assertEqual(state_data["pending_compaction"]["status"], "pending")
+
+        # 2. Corrupt state.json and run next event
+        state_file.write_text("{CORRUPTED_JSON_CONTENT!!!", encoding="utf-8")
+        proc_corrupt = subprocess.run(
+            [sys.executable, str(runner_py), "--provider", "antigravity", "--event", "PreToolUse", "--root", str(self.root)],
+            input=json.dumps({"toolCall": {"name": "test"}}),
+            text=True,
+            capture_output=True,
+            check=True
+        )
+        self.assertEqual(proc_corrupt.returncode, 0)
+
+        # Verify corrupt backup was created
+        corrupt_backups = list(self.mem_dir.glob("state.json.corrupt.*"))
+        self.assertGreaterEqual(len(corrupt_backups), 1)
+
+        # Verify state was restored from short.log
+        state_recovered = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(state_recovered["current_seq"], 6)
+        self.assertGreater(state_recovered["short_log_tokens"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

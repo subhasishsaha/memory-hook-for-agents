@@ -92,6 +92,120 @@ class TestStateSafety(unittest.TestCase):
             with self.assertRaises(OSError):
                 state.save()
 
+    def test_compaction_acknowledgement_token_accounting_invariant(self):
+        """Acknowledging an earlier sequence checkpoint must only mark tokens through that checkpoint as compacted."""
+        state = MemoryState(self.mem_dir)
+        # Generate 100 events, 1000 tokens each (total 100,000 tokens)
+        records = []
+        for i in range(1, 101):
+            records.append({
+                "seq": i,
+                "ts": "2026-11-18T00:00:00Z",
+                "provider": "antigravity",
+                "tokens": 1000,
+                "payload": {"content": f"Event {i}"}
+            })
+        self.short_log.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+
+        state.data["current_seq"] = 100
+        state.data["total_events"] = 100
+        state.data["total_lifetime_tokens"] = 100000
+        state.data["short_log_tokens"] = 100000
+        state.data["last_compacted_seq"] = 0
+        state.data["last_compacted_tokens"] = 0
+
+        # Compaction requested at #50 (representing 50,000 cumulative tokens)
+        state.request_compaction(seq=50, uncompacted_tokens=50000)
+        self.assertEqual(state.pending_compaction["lifetime_tokens_at_request"], 50000)
+
+        # Agent acknowledges #50
+        state.acknowledge_compaction(seq=50)
+
+        # Invariant checks:
+        self.assertEqual(state.last_compacted_seq, 50)
+        # last_compacted_tokens must be 50,000, NOT the current lifetime total (100,000)!
+        self.assertEqual(state.last_compacted_tokens, 50000)
+        # The remaining 50,000 tokens from events #51..#100 must remain uncompacted!
+        self.assertEqual(state.uncompacted_tokens, 50000)
+
+    def test_check_long_log_sync_satisfies_checkpoint_even_if_oversynced(self):
+        """When an agent updates long.log through a sequence >= requested checkpoint, sync is accepted."""
+        from memory_hook.constants import LONG_LOG_NAME
+
+        state = MemoryState(self.mem_dir)
+        records = [
+            {"seq": i, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 100}
+            for i in range(1, 101)
+        ]
+        self.short_log.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        state.data["current_seq"] = 100
+        state.data["total_events"] = 100
+        state.data["total_lifetime_tokens"] = 10000
+        state.data["short_log_tokens"] = 10000
+        # Request created at #50
+        state.request_compaction(seq=50, uncompacted_tokens=5000)
+        state.save()
+
+        # Agent writes long.log synced through event #100 (more than requested #50)
+        long_log_path = self.mem_dir / LONG_LOG_NAME
+        long_log_path.write_text(
+            "# Project Memory\n> Last Updated: 2026-11-18 | Synced Through Event: #100\n",
+            encoding="utf-8"
+        )
+
+        synced = state.check_long_log_sync(long_log_path)
+        self.assertTrue(synced)
+        self.assertFalse(state.has_pending_compaction())
+        self.assertEqual(state.last_compacted_seq, 100)
+        self.assertEqual(state.last_compacted_tokens, 10000)
+
+    def test_crash_recovery_before_journal_append_rolls_back_phantom_seq(self):
+        """If a crash occurred where state recorded sequence 11 but short.log only has 10, rolls back cleanly."""
+        state = MemoryState(self.mem_dir)
+        records = [
+            {"seq": i, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 10}
+            for i in range(1, 11)
+        ]
+        self.short_log.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+
+        # Phantom sequence in state
+        state.data["current_seq"] = 11
+        state.data["total_events"] = 11
+        state.save()
+
+        # Reconciliation rolls back current_seq to 10
+        changed = state.reconcile_with_journal()
+        self.assertTrue(changed)
+        self.assertEqual(state.current_seq, 10)
+
+    def test_crash_recovery_after_journal_append_reconciles_tokens_idempotently(self):
+        """If journal append succeeded with 50 tokens but state.save was interrupted, tokens are restored."""
+        state = MemoryState(self.mem_dir)
+        records = [
+            {"seq": 1, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 10},
+            {"seq": 2, "ts": "2026-11-18T00:00:00Z", "provider": "antigravity", "tokens": 50},
+        ]
+        self.short_log.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+
+        # State only accounted for event 1
+        state.data["current_seq"] = 1
+        state.data["short_log_tokens"] = 10
+        state.data["total_lifetime_tokens"] = 10
+        state.save()
+
+        # Run reconciliation
+        changed = state.reconcile_with_journal()
+        self.assertTrue(changed)
+        self.assertEqual(state.current_seq, 2)
+        self.assertEqual(state.short_log_tokens, 60)
+        self.assertEqual(state.total_lifetime_tokens, 60)
+
+        # Running reconciliation again should be a safe no-op
+        changed_again = state.reconcile_with_journal()
+        self.assertFalse(changed_again)
+        self.assertEqual(state.short_log_tokens, 60)
+        self.assertEqual(state.total_lifetime_tokens, 60)
+
 
 if __name__ == "__main__":
     unittest.main()

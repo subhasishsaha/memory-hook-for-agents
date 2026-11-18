@@ -103,6 +103,57 @@ class TestInstallerMerge(unittest.TestCase):
         self.assertFalse((self.root / ".memory").exists())
         self.assertFalse((self.root / ".agents").exists())
 
+    def test_package_and_standalone_installer_parity(self):
+        """Verifies package installer and standalone fallback installer produce identical provider configurations."""
+        import sys
+        # Import _standalone_install from install.py
+        sys_path_save = list(sys.path)
+        try:
+            repo_root = Path(__file__).resolve().parent.parent
+            if str(repo_root) not in sys.path:
+                sys.path.insert(0, str(repo_root))
+            from install import _standalone_install
+
+            root_pkg = Path(tempfile.mkdtemp())
+            root_std = Path(tempfile.mkdtemp())
+
+            try:
+                # Install via package installer
+                install_hooks(root_pkg, providers=["all"])
+                # Install via standalone fallback installer
+                _standalone_install(root_std, providers=["all"])
+
+                # 1. Antigravity parity
+                pkg_ag = json.loads((root_pkg / ".agents" / "hooks.json").read_text(encoding="utf-8"))
+                std_ag = json.loads((root_std / ".agents" / "hooks.json").read_text(encoding="utf-8"))
+                self.assertIn("memory-hook", pkg_ag)
+                self.assertIn("memory-hook", std_ag)
+                self.assertEqual(list(pkg_ag["memory-hook"].keys()), list(std_ag["memory-hook"].keys()))
+
+                # 2. Claude Code parity
+                pkg_claude = json.loads((root_pkg / ".claude" / "settings.json").read_text(encoding="utf-8"))
+                std_claude = json.loads((root_std / ".claude" / "settings.json").read_text(encoding="utf-8"))
+                self.assertEqual(list(pkg_claude["hooks"].keys()), list(std_claude["hooks"].keys()))
+
+                # 3. Codex parity
+                pkg_codex = json.loads((root_pkg / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+                std_codex = json.loads((root_std / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+                self.assertEqual(list(pkg_codex.keys()), list(std_codex.keys()))
+
+                # 4. Cursor parity
+                pkg_cursor = json.loads((root_pkg / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
+                std_cursor = json.loads((root_std / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
+                self.assertEqual(list(pkg_cursor.keys()), list(std_cursor.keys()))
+
+                # 5. Instructions protocol parity
+                self.assertIn("Universal Memory Hook Protocol", (root_pkg / "AGENTS.md").read_text(encoding="utf-8"))
+                self.assertIn("Universal Memory Hook Protocol", (root_std / "AGENTS.md").read_text(encoding="utf-8"))
+            finally:
+                shutil.rmtree(root_pkg, ignore_errors=True)
+                shutil.rmtree(root_std, ignore_errors=True)
+        finally:
+            sys.path = sys_path_save
+
 
 if __name__ == "__main__":
     unittest.main()
