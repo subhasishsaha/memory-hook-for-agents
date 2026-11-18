@@ -126,11 +126,11 @@ class TestCrossProviderHandoff(unittest.TestCase):
         self.assertEqual(lines[4]["provider"], "claude-code")
         self.assertEqual(lines[8]["provider"], "codex")
 
-        # 4. Verify Compaction state: after accumulating 10k tokens, compaction was marked
+        # 4. Verify Compaction state: after accumulating 10k tokens, compaction is pending
         state = MemoryState(self.mem_dir)
         self.assertEqual(state.current_seq, 10)
-        self.assertEqual(state.last_compacted_seq, 10)
-        self.assertGreaterEqual(state.last_compacted_tokens, 10000)
+        self.assertTrue(state.has_pending_compaction())
+        self.assertEqual(state.last_compacted_seq, 0)
 
         # 5. Simulate model updating long.log with the synthesized context
         long_log_path = self.mem_dir / LONG_LOG_NAME
@@ -157,6 +157,13 @@ class TestCrossProviderHandoff(unittest.TestCase):
 """
         with open(long_log_path, "w", encoding="utf-8") as f:
             f.write(updated_long_log)
+
+        # Automatic long.log sync detection acknowledges compaction
+        synced = state.check_long_log_sync(long_log_path)
+        self.assertTrue(synced)
+        self.assertFalse(state.has_pending_compaction())
+        self.assertEqual(state.last_compacted_seq, 10)
+        self.assertGreaterEqual(state.last_compacted_tokens, 10000)
 
         # 6. Verify Cursor (or any 4th provider) can inspect long.log and understand state
         with open(long_log_path, "r", encoding="utf-8") as f:

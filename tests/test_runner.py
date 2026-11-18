@@ -78,10 +78,19 @@ class TestRunner(unittest.TestCase):
         self.assertIn("[MEMORY HOOK UPDATE NOTICE]", injected_msg)
         self.assertIn("tokens have accumulated", injected_msg)
 
-        # State should now be marked compacted
+        # Under the acknowledgement protocol:
+        # Notice is emitted and request is marked pending, but checkpoint does not advance yet
         state = MemoryState(self.mem_dir)
-        self.assertEqual(state.last_compacted_seq, 10)
+        self.assertTrue(state.has_pending_compaction())
+        self.assertEqual(state.pending_compaction["status"], "pending")
+        self.assertGreaterEqual(state.pending_compaction["requested_at_seq"], 1)
+        self.assertEqual(state.last_compacted_seq, 0)
         self.assertEqual(state.current_seq, 10)
+
+        # Now simulate agent/host acknowledging compaction
+        state.acknowledge_compaction(10)
+        self.assertFalse(state.has_pending_compaction())
+        self.assertEqual(state.last_compacted_seq, 10)
         self.assertGreaterEqual(state.last_compacted_tokens, 10000)
 
     def test_legacy_txt_migration_to_log(self):

@@ -26,12 +26,16 @@ Developers frequently switch between different AI agents:
 ## Key Features
 
 - **Cross-Provider Compatibility**: Native support for **Antigravity** (`.agents/hooks.json`), **Claude Code** (`.claude/settings.json`), **OpenAI Codex** (`.codex/hooks.json`), and **Cursor** (`.cursor/hooks.json`).
-- **Deterministic Event Stream (`.memory/short.log`)**: Records every action, tool parameter, tool result, and model response in append-only JSON Lines format.
-- **100k Token Rolling Context Window**: Automatically prunes older entries from `.memory/short.log` to preserve a rolling 100,000 token context window, preventing file bloat and runaway context.
+- **Cross-Process File Locking**: Concurrency-safe write transactions using standard library locks (`msvcrt` on Windows, `fcntl` on Unix) to prevent race conditions during parallel hook invocations.
+- **Deterministic Event Stream (`.memory/short.log`)**: Records actions, tool parameters, tool results, and model responses in append-only JSON Lines format.
+- **100k Token Rolling Context Window**: Automatically prunes older entries from `.memory/short.log` to preserve a rolling 100,000 token context window, preventing file bloat and runaway context while protecting uncompacted events.
+- **Automatic Secret & PII Redaction**: Pattern-based masking redacts OpenAI/Anthropic/Google/AWS/GitHub API keys, tokens, bearer headers, private keys, passwords, and `.env` files into `[REDACTED:...]` markers before writing to disk.
+- **Compaction Acknowledgement Protocol**: Compaction requests remain `pending` until long-term memory synthesis is verified in `.memory/long.log` or explicitly acknowledged. Pending compactions are never prematurely marked as completed and automatically retry across sessions.
 - **Agentic Knowledge Synthesis (`.memory/long.log`)**: Distills project identity, architecture, active tasks, and decisions into high-density Markdown.
-- **Token-Based Compaction Trigger (10k Tokens)**: Whenever $\ge 10{,}000$ tokens accumulate since the last synthesis, the hook injects a prompt directive instructing the active agent to distill recent progress into `long.log`.
-- **Local Bytecode Compilation & OS Read-Only Lock**: Ships clean Python source code, compiles `.pyc` locally on the user's system at install time, deletes `.py` source, and locks `.memory/bin/memory_hook_runner.pyc` with OS-level read-only permissions (`attrib +R` / `chmod 0o555`) to prevent agents from tampering with runner scripts.
-- **Non-Destructive Instruction Appending**: Preserves existing `AGENTS.md`, `CLAUDE.md`, `CODEX.md`, and `.cursorrules` files by appending memory protocols cleanly at the bottom without overwriting existing guidelines.
+- **Token-Based Compaction Trigger (10k Tokens)**: Whenever $\ge 10{,}000$ estimated tokens accumulate since the last synthesis, the hook injects a prompt directive instructing the active agent to distill recent progress into `long.log`.
+- **Non-Destructive Configuration Merging**: Merges hooks into existing `.agents/hooks.json`, `.claude/settings.json`, `.codex/hooks.json`, and `.cursor/hooks.json` files while preserving unrelated user hooks, comments, and settings. Automatically creates `.bak` backups before modifying files.
+- **State Validation & Journal Recovery**: Detects corrupted `state.json` files, creates a timestamped corrupt backup (`state.json.corrupt.<ts>`), and automatically reconstructs sequence counters and token metrics directly from `short.log`.
+- **Local Bytecode Compilation & Accidental-Edit Lock**: Ships clean Python source code, compiles `.pyc` locally on the user's system at install time, deletes `.py` source, and marks `.memory/bin/memory_hook_runner.pyc` with OS-level read-only permissions (`attrib +R` / `chmod 0o555`) to prevent coding agents from accidentally modifying runner scripts.
 - **Zero Runtime Dependencies**: Works entirely with Python standard library. No external pip dependencies required at runtime.
 
 ---
@@ -46,8 +50,9 @@ When installed into a project, `memory-hook` creates:
 │   ├── short.log                 # Rolling context event log (JSONL, capped at 100k tokens)
 │   ├── long.log                  # Distilled, high-density project memory (Markdown)
 │   ├── state.json                # Sequence counters, token accounting, and compaction checkpoints
+│   ├── .lock                     # Standard library cross-process lock file
 │   └── bin/
-│       └── memory_hook_runner.pyc # Locally compiled bytecode runner (OS read-only locked)
+│       └── memory_hook_runner.pyc # Locally compiled bytecode runner (accidental-edit locked)
 ├── .agents/                      # Antigravity hook bindings
 │   └── hooks.json
 ├── AGENTS.md                     # Antigravity context restoration instructions
@@ -83,6 +88,11 @@ Or run directly with Python:
 python install.py /path/to/project
 ```
 
+To preview changes without touching any files:
+```bash
+python install.py /path/to/project --dry-run
+```
+
 ---
 
 ### Option 2: Python / Pip CLI
@@ -91,8 +101,11 @@ python install.py /path/to/project
 # Install package from GitHub
 pip install git+https://github.com/subhasishsaha/memory-hook-for-agents.git
 
-# Install into current project
+# Install into current project (non-destructively merges into existing configs)
 memory-hook install
+
+# Or preview changes first
+memory-hook install --dry-run
 
 # Or install for a specific provider only
 memory-hook install --provider antigravity
@@ -115,22 +128,25 @@ npx memory-hook install
 flowchart TD
     User([User Prompt]) --> Agent[AI Agent: Claude / Antigravity / Codex / Cursor]
     Agent --> PreTool[PreToolUse / PreInvocation Hook]
-    PreTool --> Runner[memory_hook_runner.pyc]
+    PreTool --> Lock[FileLock .memory/.lock]
+    Lock --> Redact[Redact Secrets & Mask API Keys]
+    Redact --> Runner[memory_hook_runner.pyc]
     Runner --> ShortLog[(.memory/short.log)]
     Runner --> Prune[Rolling Window Check: 100k tokens]
     Prune --> State[(.memory/state.json)]
     State --> Check{Uncompacted >= 10k tokens?}
     Check -- No --> Continue[Continue Agent Execution]
-    Check -- Yes --> Inject[Inject Prompt Directive: Update long.log]
+    Check -- Yes --> Inject[Emit Compaction Notice: Pending State Set]
     Inject --> Agent
     Agent --> WriteLong[Model synthesizes .memory/long.log]
+    WriteLong --> SyncCheck[long.log Sync Verified -> Compaction Acknowledged]
     Agent --> PostTool[PostToolUse / Stop Hook]
     PostTool --> Runner
 ```
 
 ### Event Normalization Schema (`short.log`)
 
-Every intercepted event is appended as a single JSON object:
+Every intercepted event is appended as a sanitized single JSON object:
 
 ```json
 {
@@ -158,21 +174,25 @@ Every intercepted event is appended as a single JSON object:
 
 ---
 
-## Security & Immutability
+## Security Model & Threat Model
 
-Because AI coding agents have file system access, `memory-hook` enforces a multi-layered security model to protect hook infrastructure from prompt injection or accidental model modification:
+`memory-hook` is designed as **trusted local developer infrastructure**:
 
-1. **Local Bytecode Compilation (`.pyc`)**: The runner source code is compiled into bytecode using the user's active Python interpreter during installation. The plain `.py` source is immediately purged. LLM text-editing tools (`edit_file`, `patch`) cannot edit binary bytecode.
-2. **OS-Level Read-Only Attribute**: `.memory/bin/memory_hook_runner.pyc` is set to read-only (`attrib +R` on Windows, `chmod 0o555` on Unix). File overwrite and deletion attempts raise an OS `PermissionError`.
-3. **Agent Protocol Directives**: `AGENTS.md`, `CLAUDE.md`, `CODEX.md`, and `.cursorrules` explicitly forbid agents from touching `.memory/bin/` or `.memory/state.json`, directing all persistent memory updates strictly to `.memory/long.log`.
+1. **Accidental-Edit Protection**: Compiling the runner into `.pyc` and setting read-only file attributes prevents LLM code editing tools from hallucinating edits or accidentally corrupting hook scripts during automated workflows. *Note: This is accidental-edit protection, not an operating-system sandbox against hostile processes running under the same user account.*
+2. **Pre-Persistence Redaction Layer**: All event payloads pass through regex-based secret redaction before being appended to `short.log`. Common cloud credentials, OpenAI/Anthropic/GitHub/Google API keys, Bearer authorization headers, private key blocks, and `.env` file contents are automatically masked as `[REDACTED:...]`.
+3. **Runner Binary Integrity Check**: `memory-hook status` computes the SHA-256 digest of `.memory/bin/memory_hook_runner.pyc` and verifies it against the recorded installation hash.
+4. **Non-Destructive Safety**: Before modifying existing configuration files (`.agents/hooks.json`, `.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`), a `.bak` backup copy is automatically created. Malformed configuration files are never overwritten.
 
 ---
 
 ## CLI Commands
 
 ```bash
-# Check memory hook status, event counters, and compaction health
+# Check memory hook status, event counters, integrity, and pending compaction
 memory-hook status
+
+# Manually acknowledge a compaction through a specific sequence
+memory-hook ack --seq 50
 
 # Inspect recent short.log events
 memory-hook inspect --tail 10
@@ -180,8 +200,8 @@ memory-hook inspect --tail 10
 # Print current long-term memory summary
 memory-hook inspect --long
 
-# Reinstall or reconfigure providers
-memory-hook install --provider all
+# Reinstall or reconfigure providers (with dry-run option)
+memory-hook install --provider all --dry-run
 ```
 
 ---
@@ -198,4 +218,4 @@ python -m unittest discover tests
 
 ## License
 
-MIT © [Memory Hook Contributors](LICENSE)
+MIT © [Subhasish Saha & Memory Hook Contributors](LICENSE)

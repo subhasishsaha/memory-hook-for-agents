@@ -24,6 +24,7 @@ from .constants import (
     PROVIDER_CURSOR,
     SHORT_LOG_NAME,
 )
+from .locking import FileLock
 from .normalizer import detect_provider, normalize_event
 from .state import MemoryState
 
@@ -86,13 +87,12 @@ def prune_short_log(
     state: MemoryState,
     max_tokens: int = MAX_SHORT_LOG_TOKENS,
 ) -> None:
-    """Maintains a rolling context window of max_tokens in short.log."""
+    """Maintains a rolling context window of max_tokens in short.log, protecting uncompacted events."""
     short_log_path = memory_dir / SHORT_LOG_NAME
     if not short_log_path.is_file():
         return
 
     try:
-        # Heuristic fast check: 100k tokens ~= 400KB. If file size < 350KB and tracked tokens <= max, skip.
         file_size = short_log_path.stat().st_size
         if file_size < 350_000 and state.short_log_tokens <= max_tokens:
             return
@@ -113,6 +113,11 @@ def prune_short_log(
     kept_lines = []
     current_tokens = 0
     window_start_seq = state.current_seq
+    # Determine safe preservation boundary: retain events required by an active pending compaction
+    pending_cutoff_seq = None
+    if state.has_pending_compaction():
+        pc = state.pending_compaction or {}
+        pending_cutoff_seq = pc.get("requested_at_seq")
 
     for line in reversed(lines):
         line_clean = line.strip()
@@ -126,10 +131,13 @@ def prune_short_log(
         except Exception:
             line_tokens = max(1, len(line_clean) // 4)
 
+        # Only prune if we exceed max_tokens.
+        # If there is a pending compaction, protect events up to pending_cutoff_seq
         if current_tokens + line_tokens > max_tokens and kept_lines:
-            break
+            if pending_cutoff_seq is None or (rec_seq is not None and rec_seq > pending_cutoff_seq):
+                break
 
-        if rec_seq:
+        if rec_seq is not None:
             window_start_seq = rec_seq
 
         kept_lines.append(line)
@@ -178,11 +186,13 @@ def run_hook(
     raw_input_data: Optional[str] = None,
     project_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Core logic to process an incoming hook event."""
+    """Core logic to process an incoming hook event under cross-process locking."""
     root = find_project_root(project_root)
     memory_dir = root / MEMORY_DIR_NAME
     memory_dir.mkdir(parents=True, exist_ok=True)
     migrate_legacy_txt_files(memory_dir)
+
+    lock_file = memory_dir / ".lock"
 
     # Parse raw stdin input
     raw_payload: Dict[str, Any] = {}
@@ -196,68 +206,75 @@ def run_hook(
     provider = detect_provider(raw_payload, provider_hint)
     event = normalize_event(raw_payload, event_hint=event_hint, provider_hint=provider)
 
-    # Sequence numbering and state tracking
-    state = MemoryState(memory_dir)
-    seq = state.next_seq(provider=provider)
-    event["seq"] = seq
-    event_tokens = int(event.get("tokens", 1))
-    state.add_tokens(event_tokens)
-
-    # Write to short.log and maintain rolling context window
-    append_to_short_log(memory_dir, event)
-    prune_short_log(memory_dir, state)
-    state.save()
-
-    # Check compaction condition (10k tokens)
-    compaction_due = state.is_compaction_due()
-    uncompacted_tokens = state.uncompacted_tokens
-
-    # Construct host provider response
+    event_name = event_hint or raw_payload.get("hookEventName") or raw_payload.get("event") or ""
     response: Dict[str, Any] = {}
 
-    if provider == PROVIDER_ANTIGRAVITY:
-        event_name = event_hint or raw_payload.get("hookEventName") or ""
-        if event_name == "PreToolUse":
-            response = {"decision": "allow"}
-        elif event_name == "PostToolUse":
-            response = {}
-        elif event_name in ["PreInvocation", "SessionStart"]:
-            if compaction_due:
-                notice = get_compaction_notice(seq, uncompacted_tokens)
-                response = {
-                    "injectSteps": [
-                        {
-                            "systemMessage": {
-                                "systemMessage": notice
+    with FileLock(lock_file, timeout=5.0):
+        # Sequence numbering and state tracking
+        state = MemoryState(memory_dir)
+
+        # Check if long.log was updated and sync acknowledgement
+        long_log_path = memory_dir / LONG_LOG_NAME
+        state.check_long_log_sync(long_log_path)
+
+        seq = state.next_seq(provider=provider)
+        event["seq"] = seq
+        event_tokens = int(event.get("tokens", 1))
+        state.add_tokens(event_tokens)
+
+        # Write to short.log and maintain rolling context window
+        append_to_short_log(memory_dir, event)
+        prune_short_log(memory_dir, state)
+
+        # Check compaction condition (10k tokens)
+        if state.is_compaction_due():
+            state.request_compaction(seq, state.uncompacted_tokens)
+
+        has_pending = state.has_pending_compaction()
+        uncompacted_tokens = state.uncompacted_tokens
+
+        # Construct host provider response
+        if provider == PROVIDER_ANTIGRAVITY:
+            if event_name == "PreToolUse":
+                response = {"decision": "allow"}
+            elif event_name == "PostToolUse":
+                response = {}
+            elif event_name in ["PreInvocation", "SessionStart"]:
+                if has_pending:
+                    notice = get_compaction_notice(seq, uncompacted_tokens)
+                    response = {
+                        "injectSteps": [
+                            {
+                                "systemMessage": {
+                                    "systemMessage": notice
+                                }
                             }
-                        }
-                    ]
-                }
-                # Once notice is injected, mark state so we don't spam every tool call in turn
-                state.mark_compacted(seq)
+                        ]
+                    }
+                else:
+                    response = {}
+            elif event_name == "Stop":
+                response = {"decision": "allow"}
             else:
                 response = {}
-        elif event_name == "Stop":
-            response = {"decision": "allow"}
+
+        elif provider == PROVIDER_CLAUDE:
+            is_turn_start = event_name in ["UserPromptSubmit", "prompt"] or not event_name
+            if has_pending and is_turn_start:
+                notice = get_compaction_notice(seq, uncompacted_tokens)
+                sys.stderr.write(f"\n{notice}\n")
+                sys.stderr.flush()
+            response = {"status": "ok"}
+
         else:
-            response = {}
+            is_turn_start = "prompt" in event_name.lower() or "submit" in event_name.lower() or not event_name
+            if has_pending and is_turn_start:
+                notice = get_compaction_notice(seq, uncompacted_tokens)
+                sys.stderr.write(f"\n{notice}\n")
+                sys.stderr.flush()
+            response = {"status": "ok"}
 
-    elif provider == PROVIDER_CLAUDE:
-        if compaction_due:
-            notice = get_compaction_notice(seq, uncompacted_tokens)
-            # Writing to stderr in Claude Code passes feedback back to model context
-            sys.stderr.write(f"\n{notice}\n")
-            sys.stderr.flush()
-            state.mark_compacted(seq)
-        response = {"status": "ok"}
-
-    else:
-        if compaction_due:
-            notice = get_compaction_notice(seq, uncompacted_tokens)
-            sys.stderr.write(f"\n{notice}\n")
-            sys.stderr.flush()
-            state.mark_compacted(seq)
-        response = {"status": "ok"}
+        state.save()
 
     return response
 

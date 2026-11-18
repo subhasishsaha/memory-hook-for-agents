@@ -17,6 +17,7 @@ from .constants import (
     PROVIDER_CURSOR,
     PROVIDER_GENERIC,
 )
+from .redaction import redact_payload
 
 
 def extract_model_response(raw_payload: Dict[str, Any]) -> str:
@@ -112,6 +113,182 @@ def truncate_string(val: Any, max_len: int = MAX_PAYLOAD_STRING_LENGTH) -> Tuple
     return val, False
 
 
+class BaseAdapter:
+    """Base provider adapter declaring normalization contract."""
+
+    def normalize(
+        self, raw_payload: Dict[str, Any], event_name: str, turn_id: Any
+    ) -> Tuple[str, Dict[str, Any], bool]:
+        """Returns (event_type, payload_dict, is_truncated)."""
+        raise NotImplementedError
+
+
+class AntigravityAdapter(BaseAdapter):
+    """Adapter for Google Antigravity / Gemini CLI hooks."""
+
+    def normalize(
+        self, raw_payload: Dict[str, Any], event_name: str, turn_id: Any
+    ) -> Tuple[str, Dict[str, Any], bool]:
+        if event_name in ["PreInvocation", "SessionStart"]:
+            text = raw_payload.get("lastUserInput") or ""
+            text_trunc, was_trunc = truncate_string(text)
+            return EVENT_USER_REQUEST, {"content": text_trunc}, was_trunc
+
+        elif event_name == "PreToolUse":
+            tc = raw_payload.get("toolCall", {})
+            call_id = tc.get("id") or f"call_{turn_id}"
+            tool_name = tc.get("name") or "unknown_tool"
+            args, was_trunc = truncate_string(tc.get("args", {}))
+            return EVENT_TOOL_CALL, {"call_id": call_id, "tool_name": tool_name, "args": args}, was_trunc
+
+        elif event_name == "PostToolUse":
+            tc = raw_payload.get("toolCall", {})
+            call_id = tc.get("id") or f"call_{turn_id}"
+            tool_name = tc.get("name") or "unknown_tool"
+            error = raw_payload.get("error")
+            content = raw_payload.get("result") or raw_payload.get("output") or ""
+            if not content and not error:
+                content = "Tool executed successfully."
+            content_trunc, was_trunc = truncate_string(content)
+            return (
+                EVENT_TOOL_RESULT,
+                {
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "status": "error" if error else "success",
+                    "content": content_trunc,
+                    "error": error,
+                },
+                was_trunc,
+            )
+
+        elif event_name in ["Stop", "PostInvocation"]:
+            response_text = extract_model_response(raw_payload)
+            resp_trunc, was_trunc = truncate_string(response_text)
+            return EVENT_MODEL_RESPONSE, {"content": resp_trunc}, was_trunc
+
+        # Fallback
+        text_trunc, was_trunc = truncate_string(raw_payload)
+        return EVENT_USER_REQUEST, {"raw": text_trunc}, was_trunc
+
+
+class ClaudeCodeAdapter(BaseAdapter):
+    """Adapter for Anthropic Claude Code hooks."""
+
+    def normalize(
+        self, raw_payload: Dict[str, Any], event_name: str, turn_id: Any
+    ) -> Tuple[str, Dict[str, Any], bool]:
+        if event_name in ["UserPromptSubmit", "prompt"]:
+            text = raw_payload.get("prompt") or raw_payload.get("user_prompt") or ""
+            text_trunc, was_trunc = truncate_string(text)
+            return EVENT_USER_REQUEST, {"content": text_trunc}, was_trunc
+
+        elif event_name == "PreToolUse":
+            call_id = raw_payload.get("tool_use_id") or raw_payload.get("id") or f"call_{turn_id}"
+            tool_name = raw_payload.get("tool_name") or raw_payload.get("tool") or "unknown_tool"
+            args, was_trunc = truncate_string(raw_payload.get("tool_input") or raw_payload.get("args") or {})
+            return EVENT_TOOL_CALL, {"call_id": call_id, "tool_name": tool_name, "args": args}, was_trunc
+
+        elif event_name == "PostToolUse":
+            call_id = raw_payload.get("tool_use_id") or raw_payload.get("id") or f"call_{turn_id}"
+            tool_name = raw_payload.get("tool_name") or raw_payload.get("tool") or "unknown_tool"
+            error = raw_payload.get("error")
+            content = raw_payload.get("tool_response") or raw_payload.get("response") or ""
+            content_trunc, was_trunc = truncate_string(content)
+            return (
+                EVENT_TOOL_RESULT,
+                {
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "status": "error" if error else "success",
+                    "content": content_trunc,
+                    "error": error,
+                },
+                was_trunc,
+            )
+
+        elif event_name in ["Stop", "SessionEnd"]:
+            resp_text = extract_model_response(raw_payload)
+            resp_trunc, was_trunc = truncate_string(resp_text)
+            return EVENT_MODEL_RESPONSE, {"content": resp_trunc}, was_trunc
+
+        # Fallback
+        text_trunc, was_trunc = truncate_string(raw_payload)
+        return EVENT_USER_REQUEST, {"raw": text_trunc}, was_trunc
+
+
+class CodexAdapter(BaseAdapter):
+    """Adapter for OpenAI Codex hooks."""
+
+    def normalize(
+        self, raw_payload: Dict[str, Any], event_name: str, turn_id: Any
+    ) -> Tuple[str, Dict[str, Any], bool]:
+        lower_event = event_name.lower()
+        if "prompt" in lower_event or "submit" in lower_event or "user" in lower_event:
+            text = raw_payload.get("prompt") or raw_payload.get("content") or raw_payload.get("text") or ""
+            text_trunc, was_trunc = truncate_string(text)
+            return EVENT_USER_REQUEST, {"content": text_trunc}, was_trunc
+
+        elif "pretool" in lower_event or "beforetool" in lower_event or "shell" in lower_event:
+            call_id = raw_payload.get("id") or raw_payload.get("call_id") or f"call_{turn_id}"
+            tool_name = raw_payload.get("name") or raw_payload.get("tool") or raw_payload.get("tool_name") or "tool"
+            args, was_trunc = truncate_string(raw_payload.get("args") or raw_payload.get("parameters") or raw_payload.get("input") or {})
+            return EVENT_TOOL_CALL, {"call_id": call_id, "tool_name": tool_name, "args": args}, was_trunc
+
+        elif "posttool" in lower_event or "aftertool" in lower_event:
+            call_id = raw_payload.get("id") or raw_payload.get("call_id") or f"call_{turn_id}"
+            tool_name = raw_payload.get("name") or raw_payload.get("tool") or raw_payload.get("tool_name") or "tool"
+            content, was_trunc = truncate_string(raw_payload.get("output") or raw_payload.get("result") or "")
+            error = raw_payload.get("error")
+            return (
+                EVENT_TOOL_RESULT,
+                {
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "status": "error" if error else "success",
+                    "content": content,
+                    "error": error,
+                },
+                was_trunc,
+            )
+
+        elif "response" in lower_event or "stop" in lower_event:
+            resp_text = extract_model_response(raw_payload)
+            resp_trunc, was_trunc = truncate_string(resp_text)
+            return EVENT_MODEL_RESPONSE, {"content": resp_trunc}, was_trunc
+
+        text_trunc, was_trunc = truncate_string(raw_payload)
+        return EVENT_USER_REQUEST, {"raw": text_trunc}, was_trunc
+
+
+class CursorAdapter(BaseAdapter):
+    """Adapter for Cursor IDE hooks."""
+
+    def normalize(
+        self, raw_payload: Dict[str, Any], event_name: str, turn_id: Any
+    ) -> Tuple[str, Dict[str, Any], bool]:
+        # Cursor shares the Codex-style structure with cursor metadata
+        return CodexAdapter().normalize(raw_payload, event_name, turn_id)
+
+
+class GenericAdapter(BaseAdapter):
+    """Fallback adapter for unknown or custom agent frameworks."""
+
+    def normalize(
+        self, raw_payload: Dict[str, Any], event_name: str, turn_id: Any
+    ) -> Tuple[str, Dict[str, Any], bool]:
+        return CodexAdapter().normalize(raw_payload, event_name, turn_id)
+
+
+ADAPTER_MAP = {
+    PROVIDER_ANTIGRAVITY: AntigravityAdapter(),
+    PROVIDER_CLAUDE: ClaudeCodeAdapter(),
+    PROVIDER_CODEX: CodexAdapter(),
+    PROVIDER_CURSOR: CursorAdapter(),
+    PROVIDER_GENERIC: GenericAdapter(),
+}
+
+
 def detect_provider(raw_payload: Dict[str, Any], hint: Optional[str] = None) -> str:
     """Infers the agent provider from CLI hint or payload characteristics."""
     if hint:
@@ -142,7 +319,7 @@ def normalize_event(
     event_hint: Optional[str] = None,
     provider_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Normalizes any incoming provider hook payload into a canonical event object."""
+    """Normalizes any incoming provider hook payload into a canonical event object with secret redaction."""
     provider = detect_provider(raw_payload, provider_hint)
     event_name = (
         event_hint or raw_payload.get("hookEventName") or raw_payload.get("event") or ""
@@ -162,139 +339,14 @@ def normalize_event(
         or None
     )
 
-    event_type = EVENT_USER_REQUEST
-    payload: Dict[str, Any] = {}
-    is_truncated = False
+    adapter = ADAPTER_MAP.get(provider, GenericAdapter())
+    event_type, raw_normalized_payload, is_truncated = adapter.normalize(raw_payload, event_name, turn_id)
 
-    # 1. Antigravity normalization
-    if provider == PROVIDER_ANTIGRAVITY:
-        if event_name in ["PreInvocation", "SessionStart"]:
-            event_type = EVENT_USER_REQUEST
-            text = raw_payload.get("lastUserInput") or ""
-            text_trunc, was_trunc = truncate_string(text)
-            payload = {"content": text_trunc}
-            is_truncated = was_trunc
+    # Apply secret redaction across the payload before storing
+    clean_payload, was_redacted = redact_payload(raw_normalized_payload)
 
-        elif event_name == "PreToolUse":
-            event_type = EVENT_TOOL_CALL
-            tc = raw_payload.get("toolCall", {})
-            call_id = tc.get("id") or f"call_{turn_id}"
-            tool_name = tc.get("name") or "unknown_tool"
-            args, was_trunc = truncate_string(tc.get("args", {}))
-            payload = {"call_id": call_id, "tool_name": tool_name, "args": args}
-            is_truncated = was_trunc
-
-        elif event_name == "PostToolUse":
-            event_type = EVENT_TOOL_RESULT
-            tc = raw_payload.get("toolCall", {})
-            call_id = tc.get("id") or f"call_{turn_id}"
-            tool_name = tc.get("name") or "unknown_tool"
-            error = raw_payload.get("error")
-            content = raw_payload.get("result") or raw_payload.get("output") or ""
-            if not content and not error:
-                content = "Tool executed successfully."
-            content_trunc, was_trunc = truncate_string(content)
-            payload = {
-                "call_id": call_id,
-                "tool_name": tool_name,
-                "status": "error" if error else "success",
-                "content": content_trunc,
-                "error": error,
-            }
-            is_truncated = was_trunc
-
-        elif event_name in ["Stop", "PostInvocation"]:
-            event_type = EVENT_MODEL_RESPONSE
-            response_text = extract_model_response(raw_payload)
-            resp_trunc, was_trunc = truncate_string(response_text)
-            payload = {"content": resp_trunc}
-            is_truncated = was_trunc
-
-    # 2. Claude Code normalization
-    elif provider == PROVIDER_CLAUDE:
-        if event_name in ["UserPromptSubmit", "prompt"]:
-            event_type = EVENT_USER_REQUEST
-            text = raw_payload.get("prompt") or raw_payload.get("user_prompt") or ""
-            text_trunc, was_trunc = truncate_string(text)
-            payload = {"content": text_trunc}
-            is_truncated = was_trunc
-
-        elif event_name == "PreToolUse":
-            event_type = EVENT_TOOL_CALL
-            call_id = raw_payload.get("tool_use_id") or raw_payload.get("id") or f"call_{turn_id}"
-            tool_name = raw_payload.get("tool_name") or raw_payload.get("tool") or "unknown_tool"
-            args, was_trunc = truncate_string(raw_payload.get("tool_input") or raw_payload.get("args") or {})
-            payload = {"call_id": call_id, "tool_name": tool_name, "args": args}
-            is_truncated = was_trunc
-
-        elif event_name == "PostToolUse":
-            event_type = EVENT_TOOL_RESULT
-            call_id = raw_payload.get("tool_use_id") or raw_payload.get("id") or f"call_{turn_id}"
-            tool_name = raw_payload.get("tool_name") or raw_payload.get("tool") or "unknown_tool"
-            error = raw_payload.get("error")
-            content = raw_payload.get("tool_response") or raw_payload.get("response") or ""
-            content_trunc, was_trunc = truncate_string(content)
-            payload = {
-                "call_id": call_id,
-                "tool_name": tool_name,
-                "status": "error" if error else "success",
-                "content": content_trunc,
-                "error": error,
-            }
-            is_truncated = was_trunc
-
-        elif event_name in ["Stop", "SessionEnd"]:
-            event_type = EVENT_MODEL_RESPONSE
-            resp_text = extract_model_response(raw_payload)
-            resp_trunc, was_trunc = truncate_string(resp_text)
-            payload = {"content": resp_trunc}
-            is_truncated = was_trunc
-
-    # 3. Generic / Codex / Cursor normalization
-    else:
-        lower_event = event_name.lower()
-        if "prompt" in lower_event or "submit" in lower_event or "user" in lower_event:
-            event_type = EVENT_USER_REQUEST
-            text = raw_payload.get("prompt") or raw_payload.get("content") or raw_payload.get("text") or ""
-            text_trunc, was_trunc = truncate_string(text)
-            payload = {"content": text_trunc}
-            is_truncated = was_trunc
-
-        elif "pretool" in lower_event or "beforetool" in lower_event or "shell" in lower_event:
-            event_type = EVENT_TOOL_CALL
-            call_id = raw_payload.get("id") or raw_payload.get("call_id") or f"call_{turn_id}"
-            tool_name = raw_payload.get("name") or raw_payload.get("tool") or raw_payload.get("tool_name") or "tool"
-            args, was_trunc = truncate_string(raw_payload.get("args") or raw_payload.get("parameters") or raw_payload.get("input") or {})
-            payload = {"call_id": call_id, "tool_name": tool_name, "args": args}
-            is_truncated = was_trunc
-
-        elif "posttool" in lower_event or "aftertool" in lower_event:
-            event_type = EVENT_TOOL_RESULT
-            call_id = raw_payload.get("id") or raw_payload.get("call_id") or f"call_{turn_id}"
-            tool_name = raw_payload.get("name") or raw_payload.get("tool") or raw_payload.get("tool_name") or "tool"
-            content, was_trunc = truncate_string(raw_payload.get("output") or raw_payload.get("result") or "")
-            error = raw_payload.get("error")
-            payload = {
-                "call_id": call_id,
-                "tool_name": tool_name,
-                "status": "error" if error else "success",
-                "content": content,
-                "error": error,
-            }
-            is_truncated = was_trunc
-
-        elif "response" in lower_event or "stop" in lower_event:
-            event_type = EVENT_MODEL_RESPONSE
-            resp_text = extract_model_response(raw_payload)
-            resp_trunc, was_trunc = truncate_string(resp_text)
-            payload = {"content": resp_trunc}
-            is_truncated = was_trunc
-        else:
-            # Fallback
-            event_type = EVENT_USER_REQUEST
-            text_trunc, was_trunc = truncate_string(raw_payload)
-            payload = {"raw": text_trunc}
-            is_truncated = was_trunc
+    # Estimate tokens on sanitized content
+    token_count = max(1, estimate_tokens(clean_payload))
 
     return {
         "ts": now_iso,
@@ -302,7 +354,7 @@ def normalize_event(
         "session_id": session_id,
         "turn_id": turn_id,
         "type": event_type,
-        "payload": payload,
-        "tokens": max(1, estimate_tokens(payload)),
+        "payload": clean_payload,
+        "tokens": token_count,
         "truncated": is_truncated,
     }

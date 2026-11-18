@@ -2,34 +2,39 @@
 
 import argparse
 import json
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 try:
     from .constants import (
+        BIN_DIR_NAME,
         LONG_LOG_NAME,
         MEMORY_DIR_NAME,
+        RUNNER_COMPILED_NAME,
         SHORT_LOG_NAME,
         STATE_FILE_NAME,
         SUPPORTED_PROVIDERS,
     )
-    from .installer import install_hooks
+    from .installer import install_hooks, verify_runner_integrity
     from .runner import main as runner_main, run_hook
     from .state import MemoryState
 except (ImportError, ValueError):
-    # Direct execution fallback (e.g. python memory_hook/cli.py)
     pkg_dir = Path(__file__).resolve().parent.parent
     if str(pkg_dir) not in sys.path:
         sys.path.insert(0, str(pkg_dir))
     from memory_hook.constants import (
+        BIN_DIR_NAME,
         LONG_LOG_NAME,
         MEMORY_DIR_NAME,
+        RUNNER_COMPILED_NAME,
         SHORT_LOG_NAME,
         STATE_FILE_NAME,
         SUPPORTED_PROVIDERS,
     )
-    from memory_hook.installer import install_hooks
+    from memory_hook.installer import install_hooks, verify_runner_integrity
     from memory_hook.runner import main as runner_main, run_hook
     from memory_hook.state import MemoryState
 
@@ -39,22 +44,26 @@ def cmd_install(args: argparse.Namespace) -> None:
     target = args.path or getattr(args, "target_path", None)
     target_path = Path(target).resolve() if target else Path.cwd().resolve()
     providers = [args.provider] if args.provider else ["all"]
-    print(f"Installing cross-provider memory-hook in: {target_path}")
-    installed = install_hooks(target_path, providers=providers)
-    print("\n[SUCCESS] Memory hook successfully installed!\n")
+    dry_run = getattr(args, "dry_run", False)
+
+    prefix = "[DRY-RUN] " if dry_run else ""
+    print(f"{prefix}Installing cross-provider memory-hook in: {target_path}")
+    installed = install_hooks(target_path, providers=providers, dry_run=dry_run)
+    print(f"\n{prefix}[SUCCESS] Memory hook {'planned' if dry_run else 'successfully installed'}!\n")
     for prov, files in installed.items():
         print(f"  • {prov.upper()}:")
         for f in files:
             print(f"      - {f}")
-    print("\nInitialized files:")
-    print(f"  • .memory/{SHORT_LOG_NAME} (Deterministic event log)")
-    print(f"  • .memory/{LONG_LOG_NAME} (High-density distilled memory)")
-    print(f"  • .memory/{STATE_FILE_NAME} (Event sequence and compaction state)")
-    print(f"  • .memory/bin/memory_hook_runner.pyc (Compiled, locked runner)")
+    if not dry_run:
+        print("\nInitialized files:")
+        print(f"  • .memory/{SHORT_LOG_NAME} (Deterministic event log)")
+        print(f"  • .memory/{LONG_LOG_NAME} (High-density distilled memory)")
+        print(f"  • .memory/{STATE_FILE_NAME} (Event sequence and compaction state)")
+        print(f"  • .memory/bin/{RUNNER_COMPILED_NAME} (Compiled, locked runner)")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    """Handles the status command."""
+    """Handles the status command with comprehensive diagnostics and token estimates."""
     target = args.path or getattr(args, "target_path", None)
     target_path = Path(target).resolve() if target else Path.cwd().resolve()
     memory_dir = target_path / MEMORY_DIR_NAME
@@ -67,22 +76,78 @@ def cmd_status(args: argparse.Namespace) -> None:
     long_log = memory_dir / LONG_LOG_NAME
 
     line_count = 0
+    short_size = 0
     if short_log.is_file():
-        with open(short_log, "r", encoding="utf-8") as f:
-            line_count = sum(1 for _ in f)
+        try:
+            short_size = short_log.stat().st_size
+            with open(short_log, "r", encoding="utf-8", errors="ignore") as f:
+                line_count = sum(1 for line in f if line.strip())
+        except Exception:
+            pass
 
     long_size = long_log.stat().st_size if long_log.is_file() else 0
+    long_mtime = "Never"
+    if long_log.is_file():
+        try:
+            mtime_dt = datetime.fromtimestamp(long_log.stat().st_mtime, tz=timezone.utc)
+            long_mtime = mtime_dt.isoformat()
+        except Exception:
+            pass
 
-    print(f"=== Memory Hook Status for: {target_path.name} ===")
+    # Check installed providers
+    installed_providers = []
+    if (target_path / ".agents" / "hooks.json").is_file():
+        installed_providers.append("antigravity")
+    if (target_path / ".claude" / "settings.json").is_file():
+        installed_providers.append("claude-code")
+    if (target_path / ".codex" / "hooks.json").is_file():
+        installed_providers.append("codex")
+    if (target_path / ".cursor" / "hooks.json").is_file():
+        installed_providers.append("cursor")
+
+    # Verify runner binary integrity
+    ok_int, int_msg = verify_runner_integrity(memory_dir)
+
+    print(f"=== Memory Hook Status: {target_path.name} ===")
+    print(f"Memory Directory:        {memory_dir}")
+    print(f"Installed Providers:     {', '.join(installed_providers) if installed_providers else 'None detected'}")
+    print(f"Runner Integrity:        {int_msg}")
     print(f"Current Sequence:        #{state.current_seq}")
+    print(f"Window Start Sequence:   #{state.window_start_seq}")
     print(f"Last Compacted Sequence: #{state.last_compacted_seq}")
     print(f"Total Logged Events:     {line_count}")
-    print(f"Uncompacted Tokens:      {state.uncompacted_tokens:,} / 10,000 (Compaction Due: {'Yes' if state.is_compaction_due() else 'No'})")
-    print(f"Rolling Context Tokens:  {state.short_log_tokens:,} / 100,000")
-    print(f"Lifetime Tracked Tokens: {state.total_lifetime_tokens:,}")
+    print(f"short.log Size:          {short_size:,} bytes")
+    print(f"long.log Size:           {long_size:,} bytes (Last Modified: {long_mtime})")
+    print(f"Uncompacted Tokens:      ~{state.uncompacted_tokens:,} / 10,000 (estimated) (Compaction Due: {'Yes' if state.is_compaction_due() else 'No'})")
+    print(f"Rolling Context Tokens:  ~{state.short_log_tokens:,} / 100,000 (estimated)")
+    print(f"Lifetime Tracked Tokens: ~{state.total_lifetime_tokens:,} (estimated)")
+
+    pc = state.pending_compaction
+    if pc and isinstance(pc, dict) and pc.get("status") == "pending":
+        print(f"Pending Compaction:      PENDING since event #{pc.get('requested_at_seq')} (~{pc.get('requested_tokens'):,} tokens, requested at {pc.get('requested_at')})")
+    else:
+        print(f"Pending Compaction:      None (all events up to #{state.last_compacted_seq} acknowledged)")
+
     print(f"Last Updated:            {state.data.get('last_updated_ts') or 'Never'}")
     print(f"Last Active Provider:    {state.data.get('last_updated_provider') or 'None'}")
-    print(f"long.log Size:           {long_size} bytes")
+
+
+def cmd_acknowledge(args: argparse.Namespace) -> None:
+    """Explicitly acknowledges compaction through a specified sequence."""
+    target = args.path or getattr(args, "target_path", None)
+    target_path = Path(target).resolve() if target else Path.cwd().resolve()
+    memory_dir = target_path / MEMORY_DIR_NAME
+    if not memory_dir.is_dir():
+        print(f"No .memory directory found in {target_path}.")
+        sys.exit(1)
+
+    state = MemoryState(memory_dir)
+    target_seq = args.seq or state.current_seq
+    changed = state.acknowledge_compaction(target_seq)
+    if changed:
+        print(f"[SUCCESS] Compaction acknowledged through event #{state.last_compacted_seq}.")
+    else:
+        print(f"[NO-OP] State already acknowledged up to or beyond event #{target_seq}.")
 
 
 def cmd_inspect(args: argparse.Namespace) -> None:
@@ -106,7 +171,7 @@ def cmd_inspect(args: argparse.Namespace) -> None:
         return
 
     lines = []
-    with open(short_log, "r", encoding="utf-8") as f:
+    with open(short_log, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
     tail_count = args.tail or 10
@@ -165,11 +230,18 @@ def main() -> None:
         default="all",
         help="Provider to configure (default: all)",
     )
+    install_p.add_argument("--dry-run", action="store_true", help="Show proposed changes without writing")
 
     # status
     status_p = subparsers.add_parser("status", help="Show memory-hook health and counters")
     status_p.add_argument("target_path", nargs="?", default=None, help="Target project directory")
     status_p.add_argument("--path", type=str, help="Target project directory")
+
+    # ack / acknowledge
+    ack_p = subparsers.add_parser("ack", help="Acknowledge long-term compaction through sequence")
+    ack_p.add_argument("target_path", nargs="?", default=None, help="Target project directory")
+    ack_p.add_argument("--path", type=str, help="Target project directory")
+    ack_p.add_argument("--seq", type=int, default=None, help="Sequence number to acknowledge through")
 
     # inspect
     inspect_p = subparsers.add_parser("inspect", help="Inspect short.log or long.log entries")
@@ -190,6 +262,8 @@ def main() -> None:
         cmd_install(args)
     elif args.subcommand == "status":
         cmd_status(args)
+    elif args.subcommand in ["ack", "acknowledge"]:
+        cmd_acknowledge(args)
     elif args.subcommand == "inspect":
         cmd_inspect(args)
     elif args.subcommand == "run":
