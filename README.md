@@ -36,7 +36,7 @@ Developers frequently switch between different AI agents:
 - **Non-Destructive Configuration Merging**: Merges hooks into existing `.agents/hooks.json`, `.claude/settings.json`, `.codex/hooks.json`, and `.cursor/hooks.json` files, preserving unrelated user hooks and settings in supported JSON configuration files. Automatically creates `.bak` backups before modifying files.
 - **State Validation & Journal Recovery**: Detects corrupted `state.json` files, creates a timestamped corrupt backup (`state.json.corrupt.<ts>`), and automatically reconstructs sequence counters and token metrics directly from `short.log`.
 - **Local Bytecode Compilation & Accidental-Edit Lock**: Ships clean Python source code, compiles `.pyc` locally on the user's system at install time, deletes `.py` source, and marks `.memory/bin/memory_hook_runner.pyc` with OS-level read-only permissions (`attrib +R` / `chmod 0o555`) to prevent coding agents from accidentally modifying runner scripts.
-- **Zero Runtime Dependencies**: Works entirely with Python standard library. No external pip dependencies required at runtime.
+- **Zero Runtime Dependencies**: Works entirely with Python 3.10+ standard library. No external pip dependencies required at runtime.
 
 ---
 
@@ -70,6 +70,8 @@ When installed into a project, `memory-hook` creates:
 ---
 
 ## Quick Start & Installation
+
+> **Requirements**: Python 3.10+ (Standard library only; zero external pip dependencies required).
 
 ### Option 1: One-Line Standalone Installer (Recommended)
 
