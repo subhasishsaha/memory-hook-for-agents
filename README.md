@@ -1,6 +1,8 @@
 # memory-hook
 
-[![Python Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)]()
+[![Release](https://img.shields.io/badge/release-v0.1.0-blue.svg)](https://github.com/subhasishsaha/memory-hook-for-agents/releases/tag/v0.1.0)
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)]()
+[![Tests](https://img.shields.io/badge/tests-72%20passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Supported Providers](https://img.shields.io/badge/providers-Claude%20%7C%20Antigravity%20%7C%20Codex%20%7C%20Cursor-blue.svg)]()
 
@@ -26,18 +28,20 @@ Developers frequently switch between different AI agents:
 ## Key Features
 
 - **Cross-Provider Compatibility**: Native support for **Antigravity** (`.agents/hooks.json`), **Claude Code** (`.claude/settings.json`), **OpenAI Codex** (`.codex/hooks.json`), and **Cursor** (`.cursor/hooks.json`).
-- **Cross-Process File Locking**: Concurrency-safe write transactions using standard library locks (`msvcrt` on Windows, `fcntl` on Unix) to prevent race conditions during parallel hook invocations.
+- **Antigravity Customization Protocol**: Fully aligned with Antigravity lifecycle hooks (`PreInvocation`, `PreToolUse`, `PostToolUse`, `Stop`, and `SessionStart`) using canonical wildcard matchers (`"matcher": "*"`) and portable multi-platform Python interpreter resolution.
+- **Zero-Leak Cross-Process File Locking**: Concurrency-safe write transactions using low-level OS file descriptors (`msvcrt` on Windows, `fcntl` on Unix) with deterministic destructor cleanup and `BaseException` protection against file descriptor leaks.
 - **Deterministic Event Stream (`.memory/short.log`)**: Records actions, tool parameters, tool results, and model responses in a rolling JSONL event journal.
 - **100k Token Rolling Context Window**: Automatically prunes older entries from `.memory/short.log` to preserve a rolling 100,000 token context window, preventing file bloat and runaway context while protecting uncompacted events.
 - **Automatic Secret & Credential Redaction**: Pattern-based masking redacts OpenAI/Anthropic/Google/AWS/GitHub API keys, tokens, bearer headers, private keys, passwords, and `.env` files into `[REDACTED:...]` markers before writing to disk.
 - **Compaction Acknowledgement Protocol**: Compaction requests remain `pending` until long-term memory synthesis is verified in `.memory/long.log` or explicitly acknowledged. Pending compactions are never prematurely marked as completed and automatically retry across sessions.
 - **Agentic Knowledge Synthesis (`.memory/long.log`)**: Distills project identity, architecture, active tasks, and decisions into high-density Markdown.
 - **Token-Based Compaction Trigger (10k Tokens)**: Whenever $\ge 10{,}000$ estimated tokens accumulate since the last synthesis, the hook injects a prompt directive instructing the active agent to distill recent progress into `long.log`.
-- **Non-Destructive Configuration Merging**: Merges hooks into existing `.agents/hooks.json`, `.claude/settings.json`, `.codex/hooks.json`, and `.cursor/hooks.json` files, preserving unrelated user hooks and settings in supported JSON configuration files. Automatically creates `.bak` backups before modifying files.
+- **Non-Destructive Configuration Merging**: Merges hooks into existing `.agents/hooks.json`, `.claude/settings.json`, `.codex/hooks.json`, and `.cursor/hooks.json` files, preserving unrelated user hooks and settings. Automatically creates `.bak` backups before modifying files.
 - **State Validation & Journal Recovery**: Detects corrupted `state.json` files, creates a timestamped corrupt backup (`state.json.corrupt.<ts>`), and automatically reconstructs sequence counters and token metrics directly from `short.log`.
-- **Journal-First Crash Consistency & Durable Sync**: Write-ahead appending to `short.log` with atomic state commits and directory-level synchronization (on POSIX) preserves journal and state consistency across process crashes and sudden terminations. Disk flushes utilize durable `fsync()` synchronization that propagates genuine I/O failures while handling platform-specific non-standard devices safely.
+- **Journal-First Crash Consistency & Durable Sync**: Write-ahead appending to `short.log` with atomic state commits and directory-level synchronization (`safe_fsync_dir` on POSIX) preserves journal and state consistency across process crashes. Safe tail-recovery automatically repairs incomplete records from interrupted writes.
 - **Local Bytecode Compilation & Accidental-Edit Lock**: Ships clean Python source code, compiles `.pyc` locally on the user's system at install time, deletes `.py` source, and marks `.memory/bin/memory_hook_runner.pyc` with OS-level read-only permissions (`attrib +R` / `chmod 0o555`) to prevent coding agents from accidentally modifying runner scripts.
 - **Zero Runtime Dependencies**: Works entirely with Python 3.10+ standard library. No external pip dependencies required at runtime.
+- **Production-Grade Node.js Wrapper**: NPX wrapper (`bin/index.js`) forwards signals (`SIGINT`/`SIGTERM`) and provides clear diagnostic error messages if Python 3 is missing.
 
 ---
 
@@ -74,7 +78,16 @@ When installed into a project, `memory-hook` creates:
 
 > **Requirements**: Python 3.10+ (Standard library only; zero external pip dependencies required).
 
-### Option 1: One-Line Standalone Installer (Recommended)
+### Option 1: NPX (Fastest — Zero Pre-Installation)
+
+Run directly in any repository without installing anything beforehand:
+```bash
+npx memory-hook install
+```
+
+---
+
+### Option 2: One-Line Standalone Installer
 
 #### Linux / macOS:
 ```bash
@@ -98,10 +111,13 @@ python install.py /path/to/project --dry-run
 
 ---
 
-### Option 2: Python / Pip CLI
+### Option 3: Python / Pip CLI
 
 ```bash
-# Install package from GitHub
+# Install via pip
+pip install memory-hook
+
+# Or install directly from GitHub
 pip install git+https://github.com/subhasishsaha/memory-hook-for-agents.git
 
 # Install into current project (non-destructively merges into existing configs)
@@ -113,14 +129,6 @@ memory-hook install --dry-run
 # Or install for a specific provider only
 memory-hook install --provider antigravity
 memory-hook install --provider claude
-```
-
----
-
-### Option 3: NPX / Node.js
-
-```bash
-npx memory-hook install
 ```
 
 ---
@@ -218,7 +226,7 @@ memory-hook install --provider all --dry-run
 The test suite runs with standard Python `unittest`:
 
 ```bash
-python -m unittest discover tests
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
 ---
