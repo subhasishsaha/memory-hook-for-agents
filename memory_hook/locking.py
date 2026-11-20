@@ -70,7 +70,6 @@ class FileLock:
         self.timeout = timeout
         self.poll_interval = poll_interval
         self._fd: Optional[int] = None
-        self._file_obj = None
 
     def acquire(self) -> "FileLock":
         """Acquires exclusive lock, retrying until timeout."""
@@ -79,14 +78,14 @@ class FileLock:
 
         while True:
             try:
-                # Open with append/read-write mode without truncating
-                self._file_obj = open(self.lock_file, "a+", encoding="utf-8")
-                self._fd = self._file_obj.fileno()
+                # Open low-level OS file descriptor directly
+                flags = os.O_RDWR | os.O_CREAT
+                self._fd = os.open(str(self.lock_file), flags, 0o666)
 
                 if sys.platform == "win32":
                     import msvcrt
                     # Lock first byte non-blocking
-                    self._file_obj.seek(0)
+                    os.lseek(self._fd, 0, os.SEEK_SET)
                     msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
                 else:
                     import fcntl
@@ -98,12 +97,11 @@ class FileLock:
 
             except (IOError, OSError):
                 # Lock is held by another process
-                if self._file_obj:
+                if self._fd is not None:
                     try:
-                        self._file_obj.close()
+                        os.close(self._fd)
                     except Exception:
                         pass
-                    self._file_obj = None
                     self._fd = None
 
                 elapsed = time.monotonic() - start_time
@@ -113,13 +111,23 @@ class FileLock:
                     )
                 time.sleep(self.poll_interval)
 
+            except BaseException:
+                # Deterministic cleanup on interrupt or unexpected abort
+                if self._fd is not None:
+                    try:
+                        os.close(self._fd)
+                    except Exception:
+                        pass
+                    self._fd = None
+                raise
+
     def release(self) -> None:
         """Releases the held lock."""
-        if self._file_obj and self._fd is not None:
+        if self._fd is not None:
             try:
                 if sys.platform == "win32":
                     import msvcrt
-                    self._file_obj.seek(0)
+                    os.lseek(self._fd, 0, os.SEEK_SET)
                     msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
@@ -128,11 +136,17 @@ class FileLock:
                 pass
             finally:
                 try:
-                    self._file_obj.close()
+                    os.close(self._fd)
                 except Exception:
                     pass
-                self._file_obj = None
                 self._fd = None
+
+    def __del__(self) -> None:
+        """Destructor to ensure lock release if object is garbage-collected."""
+        try:
+            self.release()
+        except Exception:
+            pass
 
     def __enter__(self) -> "FileLock":
         return self.acquire()

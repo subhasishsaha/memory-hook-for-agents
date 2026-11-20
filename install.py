@@ -202,6 +202,9 @@ def _standalone_install(
 
     root_abs = target_dir.resolve().as_posix()
     runner_abs = (bin_dir / "memory_hook_runner.pyc").resolve().as_posix()
+    r_arg = f'"{runner_abs}"' if " " in runner_abs else runner_abs
+    rt_arg = f'"{root_abs}"' if " " in root_abs else root_abs
+    py_cmd = "python" if sys.platform == "win32" else ("python3" if shutil.which("python3") else "python")
     installed_files = {}
 
     targets = providers or ["all"]
@@ -216,13 +219,11 @@ def _standalone_install(
             hooks_file = agents_dir / "hooks.json"
             backup_config(hooks_file)
             existing_hooks = read_json_safe(hooks_file)
-            r_arg = f'"{runner_abs}"' if " " in runner_abs else runner_abs
-            rt_arg = f'"{root_abs}"' if " " in root_abs else root_abs
             existing_hooks["memory-hook"] = {
-                "PreInvocation": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PreInvocation --root {rt_arg}'}],
-                "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PreToolUse --root {rt_arg}'}]}],
-                "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event PostToolUse --root {rt_arg}'}]}],
-                "Stop": [{"type": "command", "command": f'python {r_arg} --provider antigravity --event Stop --root {rt_arg}'}],
+                "PreInvocation": [{"type": "command", "command": f'{py_cmd} {r_arg} --provider antigravity --event PreInvocation --root {rt_arg}'}],
+                "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f'{py_cmd} {r_arg} --provider antigravity --event PreToolUse --root {rt_arg}'}]}],
+                "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f'{py_cmd} {r_arg} --provider antigravity --event PostToolUse --root {rt_arg}'}]}],
+                "Stop": [{"type": "command", "command": f'{py_cmd} {r_arg} --provider antigravity --event Stop --root {rt_arg}'}],
             }
             hooks_file.write_text(json.dumps(existing_hooks, indent=2), encoding="utf-8")
             append_or_create_instructions(target_dir / "AGENTS.md", f"# Antigravity Agent Guidelines\n\n{proto_instructions}", proto_instructions)
@@ -249,10 +250,10 @@ def _standalone_install(
                 lst.append(entry)
                 hooks[event_name] = lst
 
-            merge_claude("UserPromptSubmit", f'python "{runner_abs}" --provider claude-code --event UserPromptSubmit --root "{root_abs}"')
-            merge_claude("PreToolUse", f'python "{runner_abs}" --provider claude-code --event PreToolUse --root "{root_abs}"', matcher=".*")
-            merge_claude("PostToolUse", f'python "{runner_abs}" --provider claude-code --event PostToolUse --root "{root_abs}"', matcher=".*")
-            merge_claude("Stop", f'python "{runner_abs}" --provider claude-code --event Stop --root "{root_abs}"')
+            merge_claude("UserPromptSubmit", f'{py_cmd} {r_arg} --provider claude-code --event UserPromptSubmit --root {rt_arg}')
+            merge_claude("PreToolUse", f'{py_cmd} {r_arg} --provider claude-code --event PreToolUse --root {rt_arg}', matcher="*")
+            merge_claude("PostToolUse", f'{py_cmd} {r_arg} --provider claude-code --event PostToolUse --root {rt_arg}', matcher="*")
+            merge_claude("Stop", f'{py_cmd} {r_arg} --provider claude-code --event Stop --root {rt_arg}')
             existing_claude_settings["hooks"] = hooks
             claude_settings.write_text(json.dumps(existing_claude_settings, indent=2), encoding="utf-8")
             append_or_create_instructions(target_dir / "CLAUDE.md", f"# Claude Code Guidelines\n\n{proto_instructions}", proto_instructions)
@@ -277,10 +278,10 @@ def _standalone_install(
                 lst.append(entry)
                 existing_codex_hooks[event_name] = lst
 
-            merge_codex("UserPromptSubmit", f'python "{runner_abs}" --provider codex --event UserPromptSubmit --root "{root_abs}"')
-            merge_codex("PreToolUse", f'python "{runner_abs}" --provider codex --event PreToolUse --root "{root_abs}"')
-            merge_codex("PostToolUse", f'python "{runner_abs}" --provider codex --event PostToolUse --root "{root_abs}"')
-            merge_codex("Stop", f'python "{runner_abs}" --provider codex --event Stop --root "{root_abs}"')
+            merge_codex("UserPromptSubmit", f'{py_cmd} {r_arg} --provider codex --event UserPromptSubmit --root {rt_arg}')
+            merge_codex("PreToolUse", f'{py_cmd} {r_arg} --provider codex --event PreToolUse --root {rt_arg}')
+            merge_codex("PostToolUse", f'{py_cmd} {r_arg} --provider codex --event PostToolUse --root {rt_arg}')
+            merge_codex("Stop", f'{py_cmd} {r_arg} --provider codex --event Stop --root {rt_arg}')
             codex_hooks.write_text(json.dumps(existing_codex_hooks, indent=2), encoding="utf-8")
             append_or_create_instructions(target_dir / "CODEX.md", f"# Codex Guidelines\n\n{proto_instructions}", proto_instructions)
             installed_files["codex"] = [".codex/hooks.json", "CODEX.md"]
@@ -304,10 +305,10 @@ def _standalone_install(
                 lst.append(entry)
                 existing_cursor_hooks[event_name] = lst
 
-            merge_cursor("beforeSubmitPrompt", f'python "{runner_abs}" --provider cursor --event beforeSubmitPrompt --root "{root_abs}"')
-            merge_cursor("preToolUse", f'python "{runner_abs}" --provider cursor --event preToolUse --root "{root_abs}"')
-            merge_cursor("postToolUse", f'python "{runner_abs}" --provider cursor --event postToolUse --root "{root_abs}"')
-            merge_cursor("stop", f'python "{runner_abs}" --provider cursor --event stop --root "{root_abs}"')
+            merge_cursor("beforeSubmitPrompt", f'{py_cmd} {r_arg} --provider cursor --event beforeSubmitPrompt --root {rt_arg}')
+            merge_cursor("preToolUse", f'{py_cmd} {r_arg} --provider cursor --event preToolUse --root {rt_arg}')
+            merge_cursor("postToolUse", f'{py_cmd} {r_arg} --provider cursor --event postToolUse --root {rt_arg}')
+            merge_cursor("stop", f'{py_cmd} {r_arg} --provider cursor --event stop --root {rt_arg}')
             cursor_hooks.write_text(json.dumps(existing_cursor_hooks, indent=2), encoding="utf-8")
             append_or_create_instructions(target_dir / ".cursorrules", f"# Cursor Rules\n\n{proto_instructions}", proto_instructions)
             installed_files["cursor"] = [".cursor/hooks.json", ".cursorrules"]

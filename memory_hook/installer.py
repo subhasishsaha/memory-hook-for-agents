@@ -245,6 +245,13 @@ def quote_if_needed(path_str: str) -> str:
     return f'"{path_str}"' if " " in path_str else path_str
 
 
+def get_default_python_cmd() -> str:
+    """Returns 'python' on Windows, or 'python3' (fallback 'python') on Unix."""
+    if sys.platform == "win32":
+        return "python"
+    return "python3" if shutil.which("python3") else "python"
+
+
 def install_antigravity(project_root: Path, dry_run: bool = False) -> List[Path]:
     """Configures Antigravity .agents/hooks.json and AGENTS.md non-destructively."""
     agents_dir = project_root / ".agents"
@@ -259,6 +266,7 @@ def install_antigravity(project_root: Path, dry_run: bool = False) -> List[Path]
     runner_abs = (project_root / ".memory" / "bin" / RUNNER_SCRIPT_NAME).resolve().as_posix()
     r_arg = quote_if_needed(runner_abs)
     rt_arg = quote_if_needed(root_abs)
+    py_cmd = get_default_python_cmd()
 
     safe_backup_file(hooks_file)
     existing_hooks = read_json_safely(hooks_file)
@@ -267,27 +275,27 @@ def install_antigravity(project_root: Path, dry_run: bool = False) -> List[Path]
         "PreInvocation": [
             {
                 "type": "command",
-                "command": f'python {r_arg} --provider antigravity --event PreInvocation --root {rt_arg}'
+                "command": f'{py_cmd} {r_arg} --provider antigravity --event PreInvocation --root {rt_arg}'
             }
         ],
         "PreToolUse": [
             {
-                "matcher": ".*",
+                "matcher": "*",
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f'python {r_arg} --provider antigravity --event PreToolUse --root {rt_arg}'
+                        "command": f'{py_cmd} {r_arg} --provider antigravity --event PreToolUse --root {rt_arg}'
                     }
                 ]
             }
         ],
         "PostToolUse": [
             {
-                "matcher": ".*",
+                "matcher": "*",
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f'python {r_arg} --provider antigravity --event PostToolUse --root {rt_arg}'
+                        "command": f'{py_cmd} {r_arg} --provider antigravity --event PostToolUse --root {rt_arg}'
                     }
                 ]
             }
@@ -295,7 +303,7 @@ def install_antigravity(project_root: Path, dry_run: bool = False) -> List[Path]
         "Stop": [
             {
                 "type": "command",
-                "command": f'python {r_arg} --provider antigravity --event Stop --root {rt_arg}'
+                "command": f'{py_cmd} {r_arg} --provider antigravity --event Stop --root {rt_arg}'
             }
         ]
     }
@@ -321,6 +329,9 @@ def install_claude(project_root: Path, dry_run: bool = False) -> List[Path]:
     claude_dir.mkdir(parents=True, exist_ok=True)
     root_abs = project_root.resolve().as_posix()
     runner_abs = (project_root / ".memory" / "bin" / RUNNER_SCRIPT_NAME).resolve().as_posix()
+    r_arg = quote_if_needed(runner_abs)
+    rt_arg = quote_if_needed(root_abs)
+    py_cmd = get_default_python_cmd()
 
     safe_backup_file(settings_file)
     existing_settings = read_json_safely(settings_file)
@@ -354,22 +365,22 @@ def install_claude(project_root: Path, dry_run: bool = False) -> List[Path]:
 
     merge_hook_list(
         "UserPromptSubmit",
-        f'python "{runner_abs}" --provider claude-code --event UserPromptSubmit --root "{root_abs}"',
+        f'{py_cmd} {r_arg} --provider claude-code --event UserPromptSubmit --root {rt_arg}',
         matcher=""
     )
     merge_hook_list(
         "PreToolUse",
-        f'python "{runner_abs}" --provider claude-code --event PreToolUse --root "{root_abs}"',
-        matcher=".*"
+        f'{py_cmd} {r_arg} --provider claude-code --event PreToolUse --root {rt_arg}',
+        matcher="*"
     )
     merge_hook_list(
         "PostToolUse",
-        f'python "{runner_abs}" --provider claude-code --event PostToolUse --root "{root_abs}"',
-        matcher=".*"
+        f'{py_cmd} {r_arg} --provider claude-code --event PostToolUse --root {rt_arg}',
+        matcher="*"
     )
     merge_hook_list(
         "Stop",
-        f'python "{runner_abs}" --provider claude-code --event Stop --root "{root_abs}"',
+        f'{py_cmd} {r_arg} --provider claude-code --event Stop --root {rt_arg}',
         matcher=""
     )
 
@@ -393,6 +404,9 @@ def install_codex(project_root: Path, dry_run: bool = False) -> List[Path]:
     codex_dir.mkdir(parents=True, exist_ok=True)
     root_abs = project_root.resolve().as_posix()
     runner_abs = (project_root / ".memory" / "bin" / RUNNER_SCRIPT_NAME).resolve().as_posix()
+    r_arg = quote_if_needed(runner_abs)
+    rt_arg = quote_if_needed(root_abs)
+    py_cmd = get_default_python_cmd()
 
     safe_backup_file(hooks_file)
     existing_hooks = read_json_safely(hooks_file)
@@ -412,10 +426,10 @@ def install_codex(project_root: Path, dry_run: bool = False) -> List[Path]:
             entries.append(new_entry)
         existing_hooks[event_name] = entries
 
-    merge_simple_hook("UserPromptSubmit", f'python "{runner_abs}" --provider codex --event UserPromptSubmit --root "{root_abs}"')
-    merge_simple_hook("PreToolUse", f'python "{runner_abs}" --provider codex --event PreToolUse --root "{root_abs}"')
-    merge_simple_hook("PostToolUse", f'python "{runner_abs}" --provider codex --event PostToolUse --root "{root_abs}"')
-    merge_simple_hook("Stop", f'python "{runner_abs}" --provider codex --event Stop --root "{root_abs}"')
+    merge_simple_hook("UserPromptSubmit", f'{py_cmd} {r_arg} --provider codex --event UserPromptSubmit --root {rt_arg}')
+    merge_simple_hook("PreToolUse", f'{py_cmd} {r_arg} --provider codex --event PreToolUse --root {rt_arg}')
+    merge_simple_hook("PostToolUse", f'{py_cmd} {r_arg} --provider codex --event PostToolUse --root {rt_arg}')
+    merge_simple_hook("Stop", f'{py_cmd} {r_arg} --provider codex --event Stop --root {rt_arg}')
 
     with open(hooks_file, "w", encoding="utf-8") as f:
         json.dump(existing_hooks, f, indent=2, ensure_ascii=False)
@@ -436,6 +450,9 @@ def install_cursor(project_root: Path, dry_run: bool = False) -> List[Path]:
     cursor_dir.mkdir(parents=True, exist_ok=True)
     root_abs = project_root.resolve().as_posix()
     runner_abs = (project_root / ".memory" / "bin" / RUNNER_SCRIPT_NAME).resolve().as_posix()
+    r_arg = quote_if_needed(runner_abs)
+    rt_arg = quote_if_needed(root_abs)
+    py_cmd = get_default_python_cmd()
 
     safe_backup_file(hooks_file)
     existing_hooks = read_json_safely(hooks_file)
@@ -455,10 +472,16 @@ def install_cursor(project_root: Path, dry_run: bool = False) -> List[Path]:
             entries.append(new_entry)
         existing_hooks[event_name] = entries
 
-    merge_cursor_hook("beforeSubmitPrompt", f'python "{runner_abs}" --provider cursor --event beforeSubmitPrompt --root "{root_abs}"')
-    merge_cursor_hook("preToolUse", f'python "{runner_abs}" --provider cursor --event preToolUse --root "{root_abs}"')
-    merge_cursor_hook("postToolUse", f'python "{runner_abs}" --provider cursor --event postToolUse --root "{root_abs}"')
-    merge_cursor_hook("stop", f'python "{runner_abs}" --provider cursor --event stop --root "{root_abs}"')
+    merge_cursor_hook("beforeSubmitPrompt", f'{py_cmd} {r_arg} --provider cursor --event beforeSubmitPrompt --root {rt_arg}')
+    merge_cursor_hook("preToolUse", f'{py_cmd} {r_arg} --provider cursor --event preToolUse --root {rt_arg}')
+    merge_cursor_hook("postToolUse", f'{py_cmd} {r_arg} --provider cursor --event postToolUse --root {rt_arg}')
+    merge_cursor_hook("stop", f'{py_cmd} {r_arg} --provider cursor --event stop --root {rt_arg}')
+
+    with open(hooks_file, "w", encoding="utf-8") as f:
+        json.dump(existing_hooks, f, indent=2, ensure_ascii=False)
+
+    append_or_create_instructions(cursorrules, get_cursorrules_content())
+    return [hooks_file, cursorrules]
 
     with open(hooks_file, "w", encoding="utf-8") as f:
         json.dump(existing_hooks, f, indent=2, ensure_ascii=False)

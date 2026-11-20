@@ -44,3 +44,7 @@ CODEX.md
 
 # Local personal improvement plans
 improvement-plan/
+
+# Backup and corrupt configuration files
+*.bak
+*.corrupt.*

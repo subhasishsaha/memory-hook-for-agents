@@ -89,44 +89,55 @@ class StandaloneLock:
         self.lock_path = Path(lock_path)
         self.timeout = timeout
         self.poll_interval = poll_interval
-        self.f = None
+        self.fd = None
     def __enter__(self):
         start = time.monotonic()
         while True:
             try:
-                self.f = open(self.lock_path, "a+", encoding="utf-8")
+                self.fd = os.open(str(self.lock_path), os.O_RDWR | os.O_CREAT, 0o666)
                 if sys.platform == "win32":
                     import msvcrt
-                    self.f.seek(0)
-                    msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+                    os.lseek(self.fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
                 else:
                     import fcntl
-                    fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return self
             except (IOError, OSError):
-                if self.f:
-                    try: self.f.close()
+                if self.fd is not None:
+                    try: os.close(self.fd)
                     except Exception: pass
-                    self.f = None
+                    self.fd = None
                 elapsed = time.monotonic() - start
                 if elapsed >= self.timeout:
                     raise LockTimeoutError(f"Timed out after {self.timeout}s waiting for lock: {self.lock_path}")
                 time.sleep(self.poll_interval)
-    def __exit__(self, et, ev, tb):
-        if self.f:
+            except BaseException:
+                if self.fd is not None:
+                    try: os.close(self.fd)
+                    except Exception: pass
+                    self.fd = None
+                raise
+    def release(self):
+        if self.fd is not None:
             try:
                 if sys.platform == "win32":
                     import msvcrt
-                    self.f.seek(0)
-                    msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+                    os.lseek(self.fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
-                    fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
             except Exception: pass
             finally:
-                try: self.f.close()
+                try: os.close(self.fd)
                 except Exception: pass
-                self.f = None
+                self.fd = None
+    def __del__(self):
+        try: self.release()
+        except Exception: pass
+    def __exit__(self, et, ev, tb):
+        self.release()
 
 def safe_fsync(fd):
     try:

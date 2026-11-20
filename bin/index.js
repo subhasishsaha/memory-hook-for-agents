@@ -21,6 +21,32 @@ const child = spawn(pythonCmd, args, {
   shell: false,
 });
 
-child.on("exit", (code) => {
-  process.exit(code ?? 0);
+child.on("error", (err) => {
+  if (err.code === "ENOENT") {
+    console.error(
+      `\x1b[31m[ERROR]\x1b[0m Could not find '${pythonCmd}' on PATH. Python 3.10+ is required.`
+    );
+  } else {
+    console.error(`\x1b[31m[ERROR]\x1b[0m Failed to spawn '${pythonCmd}': ${err.message}`);
+  }
+  process.exit(1);
 });
+
+child.on("exit", (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal);
+  } else {
+    process.exit(code ?? 0);
+  }
+});
+
+const forwardSignal = (sig) => {
+  if (!child.killed) {
+    try {
+      child.kill(sig);
+    } catch (_) {}
+  }
+};
+
+process.on("SIGINT", () => forwardSignal("SIGINT"));
+process.on("SIGTERM", () => forwardSignal("SIGTERM"));
